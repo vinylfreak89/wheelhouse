@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""codex-run — the ONLY sanctioned way to drive Codex from Claude.
+
+Exists because prose instructions get shortcut. Starting bridge.py directly
+"works" but leaves the user with no window to watch, which defeats the point.
+Every subcommand runs the same preflight: GUI up, bridge ready, then act.
+
+  codex-run up                       ensure Wheelhouse.app + bridge are running
+  codex-run new [cwd]                reuse-or-create THIS CHAT's thread, print id
+                                     (the name is always the chat title -- it is
+                                      deliberately not overridable; one chat maps
+                                      to exactly one Codex thread)
+  codex-run tid                      just print this chat's thread id
+  codex-run send <id> "<text>"       send a turn, wait, print the reply
+  codex-run task <id> <file> [--effort E] [--cwd DIR] [--skill NAME]
+                                     send a turn whose prompt is a FILE
+                                     --effort low|medium|high|xhigh|max|ultra
+                                       (default xhigh; match it to the work)
+                                     --cwd  REQUIRED when the work writes
+                                       outside the thread's own directory --
+                                       workspace-write scopes writes to cwd
+  codex-run stop <id>                interrupt the active turn
+  codex-run on-file <path> <id> <file> [--effort E] [--cwd D]
+                                     wait for <path> to appear AND stop growing,
+                                     then dispatch <file> as a turn. Codex has no
+                                     wait-for-trigger of its own -- continuation
+                                     is always the orchestrator's job.
+  codex-run queue <id> "<text>"      queue a follow-up turn (runs after current)
+  codex-run busy                     is any thread mid-turn? (exit 1 if yes)
+  codex-run reload                   hot-reload the UI (no restart, no turn loss)
+  codex-run restart [--force]        restart the app; REFUSES while a turn runs
+  codex-run watch <id> [secs]        follow status / sub-agents / tokens
+  codex-run agents <id>              sub-agent threads of this thread
+  codex-run errors <id>              error-ish lines from the transcript
+  codex-run steer <id> "<text>"      type into a RUNNING turn
+  codex-run say "<text>"             new + send, auto-named from the chat (most common)
+  codex-run say "<name>" "<text>"    same, with an explicit name
+  codex-run name                     show the name that would be used
+  codex-run list                     threads, with status
+  codex-run info <id>                effective model/effort/sandbox/tokens
+  codex-run read <id>                transcript
+  codex-run archive <id>             tidy up (with its sub-agents), KEEPS transcripts
+  codex-run rm <id>                  delete permanently, INCLUDING its sub-agents
+                                     (destroys their rollouts)
+"""
+import json, os, subprocess, sys, time, urllib.error, urllib.request
+
+PORT = int(os.environ.get("CODEX_BRIDGE_PORT", "8770"))
+B = f"http://127.0.0.1:{PORT}"
+APP = os.path.expanduser("~/Documents/codex-app/Wheelhouse.app")
+
+
+def _req(path, obj=None, timeout=300):
+    data = json.dumps(obj).encode() if obj is not None else None
+    r = urllib.request.Request(B + path, data=data,
+                               headers={"Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(r, timeout=timeout))
+
+
+def alive():
+    try:
+        _req("/status", None, 2)
+        return True
+    except Exception:
+        return False
+
+
+def gui_running():
+    out = subprocess.run(["pgrep", "-f", "codex-app/Wheelhouse.app/Contents/MacOS"],
+                         capture_output=True, text=True)
+    return bool(out.stdout.strip())
+
+
+def up(quiet=False):
+    """Ensure the GUI is running -- not just the bridge. The window IS the point."""
+    if gui_running() and alive():
+        if not quiet: print("already up")
+        return
+    if not gui_running():
+        if not quiet: print("launching Wheelhouse.app ...")
+        subprocess.run(["open", APP], check=False)
+    for _ in range(120):                       # ~60s
+        if alive():
+            if not quiet: print("bridge ready")
+            return
+        time.sleep(0.5)
+    sys.exit(f"bridge did not come up on {PORT}. Debug:\n"
+             f"  python3 ~/Documents/codex-app/bridge.py")
+
+
+def rpc(method, params=None, timeout=300):
+    up(quiet=True)
+    r = _req("/rpc", {"method": method, "params": params or {}, "timeout": timeout},
+             timeout + 20)
+    if "error" in r:
+        sys.exit(f"{method} failed: {json.dumps(r['error'])[:300]}")
+    return r.get("result", {})
+
+
+def chat_title():
+    """The title of the Claude chat that is driving this.
+
+    Threads should be findable from the conversation that spawned them, so the
+    default name is "[project] <chat title>". The desktop app stores the title
+    in its session JSON; pick the most recently active session whose cwd matches
+    ours. Returns None if it cannot be determined -- callers must cope.
+    """
+    import glob
+    root = os.path.expanduser(
+        "~/Library/Application Support/Claude/claude-code-sessions")
+    here = os.path.abspath(os.getcwd())
+    best, best_ts = None, -1
+    for f in glob.glob(os.path.join(root, "*", "*", "*.json")):
+        if os.path.basename(f).startswith("deleted_"):
+            continue
+        try:
+            d = json.load(open(f))
+        except Exception:
+            continue
+        if not isinstance(d, dict) or d.get("isArchived"):
+            continue
+        cwd = os.path.abspath(d.get("cwd") or d.get("originCwd") or "")
+        if cwd != here:
+            continue
+        ts = d.get("lastActivityAt") or d.get("lastFocusedAt") or 0
+        if isinstance(ts, str):
+            ts = len(ts)            # crude but monotone enough for ISO strings
+        if ts > best_ts and d.get("title"):
+            best, best_ts = d["title"], ts
+    return best
+
+
+def default_name(cwd=None):
+    """Just the chat title.
+
+    No "[project]" prefix: the sidebar already groups threads by cwd, so the
+    prefix was only ever a workaround for the missing project API.
+    """
+    t = chat_title()
+    if t:
+        return t
+    return os.path.basename(project_cwd(cwd).rstrip("/")) or "codex session"
+
+
+def project_cwd(explicit=None):
+    """Default to the directory Claude is working in, so the thread lands in the
+    right project group -- the sidebar groups by cwd and there is no project API."""
+    return os.path.abspath(explicit or os.environ.get("CODEX_CWD") or os.getcwd())
+
+
+DEFAULT_EFFORT = os.environ.get("CODEX_EFFORT", "xhigh")
+
+
+def find_thread(name, cwd=None):
+    """An existing thread with this name in this cwd, most recent first.
+
+    One chat should map to ONE Codex thread. Creating a second thread with the
+    same name splits the conversation and loses the context the user is watching.
+    """
+    want_cwd = project_cwd(cwd)
+    best, best_ts = None, -1
+    for t in rpc("thread/list", {"limit": 100}, 40).get("data", []):
+        if (t.get("name") or "") != name:
+            continue
+        if (t.get("cwd") or want_cwd) != want_cwd:
+            continue
+        ts = t.get("recencyAt") or t.get("updatedAt") or 0
+        if ts > best_ts:
+            best, best_ts = t["id"], ts
+    return best
+
+
+def new(name, cwd=None, model=None, effort=None, sandbox="workspace-write",
+        approvals="never", reuse=True):
+    if reuse:
+        existing = find_thread(name, cwd)
+        if existing:
+            return existing
+    effort = effort or DEFAULT_EFFORT
+    p = {"cwd": project_cwd(cwd), "sandbox": sandbox,
+         "approvalPolicy": approvals, "threadSource": "user"}
+    if model: p["model"] = model
+    if effort: p["config"] = {"model_reasoning_effort": effort}
+    res = rpc("thread/start", p, 90)
+    th = res.get("thread", res)
+    tid = th.get("id") or res.get("threadId")
+    if not tid:
+        sys.exit("thread/start returned no id: " + json.dumps(res)[:200])
+    rpc("thread/name/set", {"threadId": tid, "name": name}, 30)
+    return tid
+
+
+def wait_idle(tid, limit=600):
+    for _ in range(limit):
+        for t in rpc("thread/list", {"limit": 50}, 30).get("data", []):
+            if t["id"] == tid:
+                if (t.get("status") or {}).get("type") != "active":
+                    return
+        time.sleep(1)
+
+
+def transcript(tid, tail=None):
+    data = rpc("thread/turns/list", {"threadId": tid, "limit": 100,
+               "sortDirection": "asc", "itemsView": "full"}, 120).get("data", [])
+    out = []
+    for t in data:
+        for it in t.get("items", []):
+            txt = it.get("text") or "".join(
+                c.get("text", "") for c in (it.get("content") or []))
+            if txt:
+                out.append((it.get("type", ""), txt))
+    return out[-tail:] if tail else out
+
+
+def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
+    """Send a long prompt from a file, optionally attaching a skill item.
+
+    Exists because dispatches are multi-paragraph with strict output contracts;
+    passing them as argv is unreadable and invites quoting bugs.
+    """
+    text = open(os.path.expanduser(path)).read()
+    inp = [{"type": "text", "text": text}]
+    if skill:
+        inp.append({"type": "skill", "name": skill,
+                    "path": skill_path or _skill_path(skill)})
+    p = {"threadId": tid, "input": inp, "effort": effort or DEFAULT_EFFORT}
+    # Writes are scoped to the turn's cwd under workspace-write. If the work
+    # happens outside the thread's own directory (a sandbox, a worktree), the
+    # turn MUST carry that cwd or every write fails with "Operation not
+    # permitted" -- reads succeed, so the failure surfaces late and confusingly.
+    if cwd:
+        p["cwd"] = os.path.abspath(os.path.expanduser(cwd))
+    before = len(transcript(tid))
+    rpc("turn/start", p, 1800)
+    wait_idle(tid, limit=3600)
+    for ty, txt in transcript(tid)[before:]:
+        if "agentMessage" in ty:
+            print(txt)
+
+
+def _skill_path(name):
+    """Resolve a skill name to its SKILL.md via the app-server."""
+    for entry in rpc("skills/list", {"forceReload": False}, 60).get("data", []):
+        for sk in (entry.get("skills") or []):
+            if isinstance(sk, dict) and sk.get("name") == name:
+                return sk.get("path") or ""
+    return ""
+
+
+def agents_of(tid):
+    return rpc("thread/list", {"ancestorThreadId": tid, "limit": 50}, 60).get("data", [])
+
+
+def watch(tid, secs=1800):
+    """Follow a run: status, sub-agents, token burn. Prints only on change."""
+    start = time.time(); last = None
+    while time.time() - start < secs:
+        rows = rpc("thread/list", {"limit": 60}, 40).get("data", [])
+        hit = [t for t in rows if t["id"] == tid]
+        st = (hit[0].get("status") or {}).get("type") if hit else "not-listed"
+        kids = agents_of(tid)
+        ksig = " ".join(f"{k.get('agentNickname')}={(k.get('status') or {}).get('type')}"
+                        for k in kids)
+        sig = f"{st}  {ksig}".strip()
+        if sig != last:
+            try:
+                m = json.load(urllib.request.urlopen(
+                    f"{B}/threadmeta?id={tid}", timeout=20))
+                tok = m.get("tokens_used")
+            except Exception:
+                tok = "?"
+            print(f"  +{int(time.time()-start):5}s  {sig}  tokens={tok}", flush=True)
+            last = sig
+        # a not-listed blip is transient; only stop on a real idle with no active kids
+        if st == "idle" and all((k.get("status") or {}).get("type") != "active" for k in kids):
+            print("  -- idle --", flush=True); return True
+        time.sleep(15)
+    print("  -- watch window ended, still running --", flush=True); return False
+
+
+def errors_of(tid):
+    """Lines that look like tool/tooling errors -- the active-learning input."""
+    import re
+    pat = re.compile(r"(error|Error|Traceback|cannot|unable|not found|denied|"
+                     r"failed|refus|missing|unsupported|not permitted|/login)")
+    out = []
+    for ty, txt in transcript(tid):
+        if "agentMessage" not in ty:
+            continue
+        for line in txt.splitlines():
+            if pat.search(line):
+                out.append(line.strip())
+    return out
+
+
+def send(tid, text, model=None, effort=None):
+    p = {"threadId": tid, "input": [{"type": "text", "text": text}]}
+    if model: p["model"] = model
+    p["effort"] = effort or DEFAULT_EFFORT
+    before = len(transcript(tid))
+    rpc("turn/start", p, 900)
+    wait_idle(tid)
+    for ty, txt in transcript(tid)[before:]:
+        if "agentMessage" in ty:
+            print(txt)
+
+
+def main():
+    a = sys.argv[1:]
+    if not a: sys.exit(__doc__)
+    c = a[0]
+    if c == "up":      up()
+    elif c == "name":  print(default_name())
+    elif c == "tid":
+        t = find_thread(default_name())
+        print(t if t else "(none yet)")
+    elif c == "new":
+        # name is ALWAYS the chat title -- not overridable on purpose
+        cwd = a[1] if len(a) > 1 else None
+        nm = default_name(cwd)
+        existed = find_thread(nm, cwd)
+        tid = new(nm, cwd)
+        print(tid)
+        if existed:
+            print(f"(reused existing thread for \"{nm}\")", file=sys.stderr)
+    elif c == "say":
+        # codex-run say "<text>"            -> name derived from the chat title
+        # codex-run say "<name>" "<text>"   -> explicit name
+        if len(a) == 2:
+            nm, text = default_name(), a[1]
+        else:
+            nm, text = a[1], a[2]
+        existed = find_thread(nm)
+        tid = new(nm)
+        print(f"[{tid}] {nm}{' (reused)' if existed else ' (new)'}", file=sys.stderr)
+        send(tid, text)
+    elif c == "send":  send(a[1], a[2])
+    elif c == "task":
+        # codex-run task <id> <file> [--effort E] [--cwd DIR] [--skill NAME]
+        eff = cwdo = sk = None
+        rest = a[3:]
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--effort" and i + 1 < len(rest): eff = rest[i+1]; i += 2
+            elif rest[i] == "--cwd" and i + 1 < len(rest): cwdo = rest[i+1]; i += 2
+            elif rest[i] == "--skill" and i + 1 < len(rest): sk = rest[i+1]; i += 2
+            else:
+                if rest[i] in ("low","medium","high","xhigh","max","ultra"): eff = rest[i]
+                else: sk = rest[i]
+                i += 1
+        send_file(a[1], a[2], sk, effort=eff, cwd=cwdo)
+    elif c == "reload":
+        up(quiet=True)
+        urllib.request.urlopen(B + "/reload", timeout=10).read()
+        print("reloaded (UI only — no turn interrupted)")
+    elif c == "busy":
+        act = [t for t in rpc("thread/list", {"limit": 60}, 40).get("data", [])
+               if (t.get("status") or {}).get("type") == "active"]
+        for t in act:
+            print(f"ACTIVE {t['id']}  {t.get('name')}")
+        if not act:
+            print("idle")
+        sys.exit(1 if act else 0)
+    elif c == "restart":
+        # The bridge OWNS codex app-server as a child: killing it kills any
+        # running turn outright (observed -- a user message was accepted, then
+        # destroyed 6s later by a restart). UI changes need only a page reload,
+        # so a restart is almost never the right tool.
+        force = "--force" in a
+        act = []
+        try:
+            act = [t for t in rpc("thread/list", {"limit": 60}, 40).get("data", [])
+                   if (t.get("status") or {}).get("type") == "active"]
+        except Exception:
+            pass
+        if act and not force:
+            for t in act:
+                print(f"REFUSING: {t['id']} is mid-turn ({t.get('name')})")
+            print("A restart would abort it. Wait, or pass --force to destroy it.")
+            print("If you only changed ui/index.html, reload the page instead "
+                  "(Cmd-R in the app) -- the bridge serves it fresh.")
+            sys.exit(1)
+        subprocess.run(["pkill", "-f", "codex-app/Wheelhouse.app/Contents/MacOS"], check=False)
+        time.sleep(1)
+        subprocess.run(["pkill", "-f", "codex-app/bridge.py"], check=False)
+        time.sleep(1)
+        subprocess.run(["open", APP], check=False)
+        for _ in range(120):
+            if alive():
+                print("restarted"); return
+            time.sleep(0.5)
+        print("restarted (bridge slow to answer)")
+    elif c == "on-file":
+        # Codex cannot wait on anything: a turn ends and that is that. So the
+        # orchestrator waits, then dispatches. Waits for the file to exist AND
+        # to stop changing size, so a half-written file is never consumed.
+        target = os.path.expanduser(a[1])
+        tid, taskfile = a[2], a[3]
+        rest = a[4:]
+        eff = cwdo = None
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--effort" and i + 1 < len(rest): eff = rest[i+1]; i += 2
+            elif rest[i] == "--cwd" and i + 1 < len(rest): cwdo = rest[i+1]; i += 2
+            else: i += 1
+        print(f"waiting for {target} ...", flush=True)
+        last, stable, waited = -1, 0, 0
+        while waited < 6 * 3600:
+            if os.path.exists(target):
+                sz = os.path.getsize(target)
+                stable = stable + 1 if sz == last else 0
+                last = sz
+                if stable >= 3:               # unchanged across 3 polls
+                    print(f"{target} ready ({sz:,} bytes)", flush=True)
+                    break
+            time.sleep(20); waited += 20
+        else:
+            sys.exit(f"timed out waiting for {target}")
+        # do not stomp a turn that is still running
+        while True:
+            rows = rpc("thread/list", {"limit": 60}, 40).get("data", [])
+            act = [t for t in rows if t["id"] == tid
+                   and (t.get("status") or {}).get("type") == "active"]
+            if not act: break
+            print("  thread busy, waiting for it to finish...", flush=True)
+            time.sleep(30)
+        send_file(tid, taskfile, effort=eff, cwd=cwdo)
+    elif c == "queue":
+        r = rpc("thread/queue/add", {"threadId": a[1],
+                "input": [{"type": "text", "text": a[2]}],
+                "clientUserMessageId": f"cr-{int(time.time()*1000)}"}, 60)
+        print("queued" if r is not None else "queue failed")
+    elif c == "stop":
+        turns = rpc("thread/turns/list", {"threadId": a[1], "limit": 1,
+                    "sortDirection": "desc"}, 60).get("data", [])
+        if not turns:
+            print("no turn to stop")
+        else:
+            r = rpc("turn/interrupt", {"threadId": a[1], "turnId": turns[0]["id"]}, 60)
+            print("interrupted")
+    elif c == "watch":
+        watch(a[1], int(a[2]) if len(a) > 2 else 1800)
+    elif c == "agents":
+        for k in agents_of(a[1]):
+            print(f"{k['id']}  {(k.get('status') or {}).get('type'):9} "
+                  f"{k.get('agentNickname') or ''}")
+    elif c == "errors":
+        for line in errors_of(a[1]):
+            print(line)
+    elif c == "steer":
+        st = rpc("thread/read", {"threadId": a[1]}, 60)
+        turns = rpc("thread/turns/list", {"threadId": a[1], "limit": 1,
+                    "sortDirection": "desc"}, 60).get("data", [])
+        if not turns: sys.exit("no active turn to steer")
+        rpc("turn/steer", {"threadId": a[1], "expectedTurnId": turns[0]["id"],
+                           "input": [{"type": "text", "text": a[2]}]}, 120)
+        print("steered")
+    elif c == "list":
+        for t in rpc("thread/list", {"limit": 50}, 30).get("data", []):
+            st = (t.get("status") or {}).get("type", "?")
+            print(f"{t['id']}  {st:9}  {t.get('name') or (t.get('preview') or '')[:50]}")
+    elif c == "info":
+        print(json.dumps(json.load(urllib.request.urlopen(
+            f"{B}/threadmeta?id={a[1]}", timeout=20)), indent=1))
+    elif c == "read":
+        for ty, txt in transcript(a[1]): print(f"[{ty}] {txt}")
+    elif c == "archive":
+        # sub-agents belong to their parent -- archive the tree together
+        kids = rpc("thread/list", {"ancestorThreadId": a[1], "limit": 50}, 40).get("data", [])
+        for k in kids:
+            rpc("thread/archive", {"threadId": k["id"]}, 30)
+        rpc("thread/archive", {"threadId": a[1]}, 30)
+        extra = f" + {len(kids)} sub-agent(s)" if kids else ""
+        print(f"archived (transcript kept){extra}")
+    elif c == "rm":
+        try:
+            up(quiet=True)
+            # Sub-agent threads persist their own rollouts; deleting only the
+            # parent orphans them. Remove the tree.
+            kids = rpc("thread/list", {"ancestorThreadId": a[1], "limit": 50}, 40)\
+                   .get("data", [])
+            for k in kids:
+                _req("/rpc", {"method": "thread/delete",
+                              "params": {"threadId": k["id"]}, "timeout": 30}, 50)
+            if kids:
+                print(f"deleted {len(kids)} sub-agent thread(s)")
+            r = _req("/rpc", {"method": "thread/delete",
+                              "params": {"threadId": a[1]}, "timeout": 30}, 50)
+            if "error" in r:
+                m = json.dumps(r["error"])
+                if "no rollout" in m:
+                    print("nothing to delete (thread never persisted a rollout)")
+                else:
+                    sys.exit("thread/delete failed: " + m[:300])
+            else:
+                print("deleted (rollout destroyed)")
+        except urllib.error.URLError as e:
+            sys.exit(f"bridge unreachable: {e}")
+    else: sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()
