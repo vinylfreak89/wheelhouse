@@ -1,0 +1,21 @@
+# Build output
+*.app/
+native/wheelhouse
+__pycache__/
+*.pyc
+.DS_Store
+
+# Machine-local state: thread<->project bindings, extra skill roots.
+# Contains local paths and thread ids. Never published.
+state/
+
+# Private working material. NOT part of the tool and must never enter
+# history -- it holds an extracted research corpus.
+sandbox/
+
+# Owner's internal worklog, not documentation.
+DECISIONS.md
+
+# Scaffolding for a private experiment, not part of the tool.
+REPLAY-HANDOFF.md
+skills/replay-*/
