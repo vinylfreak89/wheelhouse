@@ -63,6 +63,12 @@ button{font:inherit}
 #usage .fill{height:100%;background:var(--accent);border-radius:2px;transition:width .4s}
 #usage .fill.warn{background:var(--warn)} #usage .fill.hot{background:var(--err)}
 #usage .plan{display:flex;justify-content:space-between;color:var(--dim2);margin-top:7px}
+#usage .cred{display:flex;justify-content:space-between;margin-top:7px;
+  padding-top:7px;border-top:1px solid var(--line)}
+#usage .cred b{color:var(--dim);font-weight:600}
+#usage .cred span{color:var(--accent2);font-weight:600}
+#usage .cred.covering span{color:var(--warn)}
+#usage .note{color:var(--dim2);margin-top:4px;font-size:10.5px}
 
 /* ---------- main ---------- */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
@@ -84,6 +90,27 @@ button{font:inherit}
      margin-bottom:4px;display:flex;gap:7px;align-items:baseline}
 .who .ts{text-transform:none;letter-spacing:0;opacity:.55;font-variant-numeric:tabular-nums}
 .body{white-space:pre-wrap;word-wrap:break-word}
+.body.md{white-space:normal}
+.body.md>:first-child{margin-top:0} .body.md>:last-child{margin-bottom:0}
+.body.md p{margin:0 0 8px}
+.body.md h1,.body.md h2,.body.md h3,.body.md h4{margin:13px 0 6px;font-weight:650;color:var(--fg)}
+.body.md h1{font-size:15px} .body.md h2{font-size:14px}
+.body.md h3,.body.md h4{font-size:13px}
+.body.md ul,.body.md ol{margin:0 0 8px;padding-left:20px}
+.body.md li{margin:2px 0}
+.body.md code{font-family:var(--mono);font-size:11.5px;background:var(--panel);
+  border:1px solid var(--line);border-radius:4px;padding:1px 4px}
+.body.md pre{margin:0 0 8px;padding:8px 10px;background:var(--panel);
+  border:1px solid var(--line);border-radius:6px;overflow-x:auto}
+.body.md pre code{background:none;border:0;padding:0;font-size:11.5px}
+.body.md blockquote{margin:0 0 8px;padding-left:10px;border-left:2px solid var(--line);color:var(--dim)}
+.body.md table{border-collapse:collapse;margin:0 0 8px;font-size:12px;display:block;
+  overflow-x:auto;max-width:100%}
+.body.md th,.body.md td{border:1px solid var(--line);padding:4px 8px;text-align:left}
+.body.md th{color:var(--dim);font-weight:600}
+.body.md a{color:var(--accent)}
+.body.md hr{border:0;border-top:1px solid var(--line);margin:10px 0}
+.body.md strong{color:var(--fg);font-weight:650}
 .msg.user .body{background:var(--user);padding:9px 12px;border-radius:9px;display:inline-block;max-width:100%}
 .msg.tool .body,.msg.cmd .body{font-family:var(--mono);font-size:11.5px;background:var(--panel);
     border:1px solid var(--line);padding:8px 10px;border-radius:6px;color:var(--dim);
@@ -300,6 +327,75 @@ function fmtTs(ms){
   if(!ms) return "";
   return new Date(ms).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
 }
+/* ---------- markdown ----------
+   Agent output is markdown; rendering it as literal text made tables and code
+   fences unreadable. Deliberately small and dependency-free: escape FIRST, then
+   build HTML from the escaped text, so nothing an agent emits can inject markup.
+   Only http/https links are linkified. */
+function esc(s){
+  return String(s).replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function mdInline(t){
+  return t
+    .replace(/`([^`]+)`/g, (_,c)=>`<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[\s(])_([^_\n]+)_/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+             '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+}
+function md(src){
+  const lines = esc(String(src||"")).split("\n");
+  const out=[]; let i=0;
+  const isTableSep = l => /^\s*\|?[\s:-]*-[-\s:|]*\|?\s*$/.test(l) && l.includes("-");
+  const cells = l => l.replace(/^\s*\|/,"").replace(/\|\s*$/,"").split("|").map(c=>c.trim());
+  while(i<lines.length){
+    const l=lines[i];
+    if(/^\s*```/.test(l)){                                   // fenced code
+      const buf=[]; i++;
+      while(i<lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]);
+      i++; out.push(`<pre><code>${buf.join("\n")}</code></pre>`); continue;
+    }
+    if(/^\s*(---+|\*\*\*+|___+)\s*$/.test(l)){ out.push("<hr>"); i++; continue; }
+    const h=l.match(/^(#{1,4})\s+(.*)$/);
+    if(h){ const n=h[1].length; out.push(`<h${n}>${mdInline(h[2])}</h${n}>`); i++; continue; }
+    if(l.includes("|") && i+1<lines.length && isTableSep(lines[i+1])){
+      const head=cells(l); i+=2; const rows=[];
+      while(i<lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      out.push(`<table><thead><tr>${head.map(c=>`<th>${mdInline(c)}</th>`).join("")}</tr></thead>`+
+               `<tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${mdInline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+      continue;
+    }
+    if(/^\s*&gt;\s?/.test(l)){
+      const buf=[];
+      while(i<lines.length && /^\s*&gt;\s?/.test(lines[i])) buf.push(lines[i++].replace(/^\s*&gt;\s?/,""));
+      out.push(`<blockquote>${md(buf.join("\n").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'"))}</blockquote>`);
+      continue;
+    }
+    if(/^\s*([-*+]|\d+\.)\s+/.test(l)){
+      const ord=/^\s*\d+\./.test(l); const buf=[];
+      while(i<lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i]))
+        buf.push(lines[i++].replace(/^\s*([-*+]|\d+\.)\s+/,""));
+      out.push(`<${ord?"ol":"ul"}>${buf.map(x=>`<li>${mdInline(x)}</li>`).join("")}</${ord?"ol":"ul"}>`);
+      continue;
+    }
+    if(!l.trim()){ i++; continue; }
+    const buf=[];
+    while(i<lines.length && lines[i].trim() && !/^\s*(```|#{1,4}\s|[-*+]\s|\d+\.\s|&gt;)/.test(lines[i])
+          && !(lines[i].includes("|") && i+1<lines.length && isTableSep(lines[i+1])))
+      buf.push(lines[i++]);
+    out.push(`<p>${mdInline(buf.join("\n")).replace(/\n/g,"<br>")}</p>`);
+  }
+  return out.join("");
+}
+function renderMd(el){
+  if(!el) return;
+  const raw = el.dataset.raw ?? el.textContent;
+  el.innerHTML = md(raw); el.classList.add("md");
+}
+
 function add(cls,who,text,ts){
   // ts is the message's REAL time, from the rollout. Live messages omit it
   // (=> now). NULL MEANS UNKNOWN -- render nothing rather than stamping "now",
@@ -314,6 +410,8 @@ function add(cls,who,text,ts){
   w.append(wn,wt);
   if(when) d.dataset.ts=String(when);
   const b=document.createElement("div"); b.className="body"; b.textContent=text||"";
+  // Agent prose is markdown; command output and user text are not.
+  if((cls==="agent"||cls==="rsn") && text){ b.dataset.raw=text; renderMd(b); }
   d.append(w,b); logEl.append(d); logEl.scrollTop=logEl.scrollHeight;
   // Cache ONLY what server history does not replay (commands / tool items).
   // Caching messages too meant every re-render added the server's copy AND the
@@ -664,9 +762,22 @@ async function loadUsage(){
   let html="";
   if(p)   html+=bar(human(p.windowDurationMins||300), p);
   if(sec) html+=bar(human(sec.windowDurationMins||10080), sec);
+  // Credits ride along in the same payload as the rate limits -- no extra call.
+  // Shown as their own row because when a window is exhausted this is the number
+  // that decides whether work continues.
   const cr=rl.credits||{};
   html+=`<div class="plan"><span>${rl.planType||""}</span><span>${
-    cr.unlimited?"unlimited":(cr.hasCredits?("credits "+cr.balance):"")}</span></div>`;
+    rl.spendControlReached?"spend limit reached":""}</span></div>`;
+  if(cr.unlimited){
+    html+=`<div class="cred"><b>credits</b><span>unlimited</span></div>`;
+  } else if(cr.hasCredits){
+    const covering = p && p.usedPercent>=100;
+    html+=`<div class="cred${covering?" covering":""}"><b>credits</b><span>${cr.balance}</span></div>`;
+    if(covering) html+=`<div class="note">5h window exhausted \u2014 credits in use</div>`;
+  }
+  const rc=((r.result||{}).rateLimitResetCredits)||{};
+  if(rc.availableCount>0)
+    html+=`<div class="note">${rc.availableCount} limit-reset credit(s) available</div>`;
   $("#usage").innerHTML=html;
 }
 
@@ -1154,11 +1265,15 @@ es.onmessage=ev=>{
   }
   else if(meth==="item/agentMessage/delta"){
     if(!streamEl) streamEl=add("agent","codex","");
-    streamEl.textContent+=(p.delta??p.text??""); logEl.scrollTop=logEl.scrollHeight;
+    streamEl.dataset.raw=(streamEl.dataset.raw||"")+(p.delta??p.text??"");
+    streamEl.textContent=streamEl.dataset.raw;   // plain while streaming: half-written
+    logEl.scrollTop=logEl.scrollHeight;          // markdown renders wrong mid-token
   }
   else if(/reasoning.*delta/i.test(meth||"")){
     if(!reasonEl) reasonEl=add("rsn","thinking","");
-    reasonEl.textContent+=(p.delta??p.text??""); logEl.scrollTop=logEl.scrollHeight;
+    reasonEl.dataset.raw=(reasonEl.dataset.raw||"")+(p.delta??p.text??"");
+    reasonEl.textContent=reasonEl.dataset.raw;
+    logEl.scrollTop=logEl.scrollHeight;
   }
   else if(meth==="item/started"){
     const ty=String((p.item||{}).type||"");
@@ -1168,8 +1283,8 @@ es.onmessage=ev=>{
     const it=p.item||{}; const ty=String(it.type||"");
     if(/subAgent|collabAgent/i.test(ty)) loadAgents();
     if(/^user/i.test(ty)) return;              // already shown when we sent it
-    if(/agentMessage|agent_message/i.test(ty)){ streamEl=null; }
-    else if(/reasoning/i.test(ty)){ reasonEl=null; }
+    if(/agentMessage|agent_message/i.test(ty)){ renderMd(streamEl); streamEl=null; }
+    else if(/reasoning/i.test(ty)){ renderMd(reasonEl); reasonEl=null; }
     else renderItem(it);
   }
   else if(meth==="serverRequest/resolved"){
