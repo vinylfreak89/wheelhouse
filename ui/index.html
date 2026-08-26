@@ -258,6 +258,22 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const logEl=$("#log"), listEl=$("#list"), wlogEl=$("#wlog");
 let cur=null, curInfo={}, busy=false, streamEl=null, reasonEl=null;
 let curTurn=null;                 // active turn id: turn/steer and turn/interrupt both need it
+
+/* curTurn is only ever set by a live turn/started event, so it is null whenever
+   the turn began while this view was not listening: switching to a thread that
+   is already running, reloading mid-turn, or a turn started from the CLI while
+   the UI sat on another thread. Ask the server rather than refusing to act --
+   this is what bin/codex-run has always done. */
+async function activeTurnId(){
+  if(curTurn) return curTurn;
+  try{
+    const r=await rpc("thread/turns/list",
+      {threadId:cur,limit:1,sortDirection:"desc"},30);
+    const t=((r.result&&r.result.data)||[])[0];
+    if(t&&t.id){ curTurn=t.id; return curTurn; }
+  }catch(e){}
+  return null;
+}
 let threads=[], tab="projects", models=[], wirePaused=false;
 const cwdCache={};
 let DEFAULT_CWD="";        /* supplied by the bridge; see loadProjects */
@@ -939,11 +955,12 @@ async function send(){
   // A turn is already running -> steer it instead of queueing a new one.
   // This is the whole point of the app: you type into work already in flight.
   if(busy){
-    if(!curTurn){ add("err","steer","no active turn id yet — try again in a moment"); return; }
+    const steerTo=await activeTurnId();
+    if(!steerTo){ add("err","steer","no active turn to steer"); return; }
     $("#inp").value="";
     add("user","you (steer)",t);
     const r=await rpc("turn/steer",
-      {threadId:cur,expectedTurnId:curTurn,input:[{type:"text",text:t}]},120);
+      {threadId:cur,expectedTurnId:steerTo,input:[{type:"text",text:t}]},120);
     if(r.error) add("err","turn/steer",JSON.stringify(r.error).slice(0,400));
     return;
   }
@@ -964,8 +981,9 @@ async function send(){
 $("#send").onclick=send;
 $("#stop").onclick=async()=>{
   if(!cur) return;
-  if(!curTurn){ add("err","stop","no active turn id"); return; }
-  const r=await rpc("turn/interrupt",{threadId:cur,turnId:curTurn},30);
+  const stopTo=await activeTurnId();
+  if(!stopTo){ add("err","stop","no active turn to interrupt"); return; }
+  const r=await rpc("turn/interrupt",{threadId:cur,turnId:stopTo},30);
   if(r.error) add("err","turn/interrupt",JSON.stringify(r.error).slice(0,300));
 };
 $("#inp").addEventListener("keydown",e=>{
