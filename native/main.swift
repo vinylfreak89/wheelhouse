@@ -24,7 +24,6 @@ let BRIDGE: String = {
     }
     let appDir = Bundle.main.bundleURL.deletingLastPathComponent().path
     tries.append("\(appDir)/bridge.py")
-    tries.append("\(NSHomeDirectory())/Documents/codex-app/bridge.py")
     return tries.first(where: { fm.fileExists(atPath: $0) }) ?? tries.last!
 }()
 

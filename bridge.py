@@ -399,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
     # A thread's project is pinned in the registry that bin/codex-run writes.
     # threads.cwd is NOT it: a turn's --cwd overwrites that column, which used
     # to drag the conversation into whatever directory the work touched.
-    REGISTRY = os.path.expanduser("~/Documents/codex-app/state/projects.json")
+    REGISTRY = os.path.join(HERE, "state", "projects.json")
 
     def _registry(self):
         try:

@@ -50,7 +50,13 @@ import json, os, subprocess, sys, time, urllib.error, urllib.request
 
 PORT = int(os.environ.get("CODEX_BRIDGE_PORT", "8770"))
 B = f"http://127.0.0.1:{PORT}"
-APP = os.path.expanduser("~/Documents/codex-app/Wheelhouse.app")
+# Resolve everything relative to this file, not to one machine's layout.
+# realpath() matters: this script is normally reached through a symlink on
+# PATH, and __file__ would otherwise point at the symlink's directory.
+ROOT = os.environ.get("CODEX_APP_DIR") or os.path.dirname(
+    os.path.dirname(os.path.realpath(__file__)))
+APP = os.path.join(ROOT, "Wheelhouse.app")
+BRIDGE_PY = os.path.join(ROOT, "bridge.py")
 
 
 def _req(path, obj=None, timeout=300):
@@ -69,7 +75,7 @@ def alive():
 
 
 def gui_running():
-    out = subprocess.run(["pgrep", "-f", "codex-app/Wheelhouse.app/Contents/MacOS"],
+    out = subprocess.run(["pgrep", "-f", f"{APP}/Contents/MacOS"],
                          capture_output=True, text=True)
     return bool(out.stdout.strip())
 
@@ -88,7 +94,7 @@ def up(quiet=False):
             return
         time.sleep(0.5)
     sys.exit(f"bridge did not come up on {PORT}. Debug:\n"
-             f"  python3 ~/Documents/codex-app/bridge.py")
+             f"  python3 {BRIDGE_PY}")
 
 
 def rpc(method, params=None, timeout=300):
@@ -157,7 +163,7 @@ def project_cwd(explicit=None):
 # --cwd, which Codex persists into threads.cwd and which the sidebar was
 # grouping on. Writing work into another directory is routine; it must not
 # relocate the conversation.
-REGISTRY = os.path.expanduser("~/Documents/codex-app/state/projects.json")
+REGISTRY = os.path.join(ROOT, "state", "projects.json")
 
 
 def _registry():
@@ -517,9 +523,9 @@ def main():
             print("If you only changed ui/index.html, reload the page instead "
                   "(Cmd-R in the app) -- the bridge serves it fresh.")
             sys.exit(1)
-        subprocess.run(["pkill", "-f", "codex-app/Wheelhouse.app/Contents/MacOS"], check=False)
+        subprocess.run(["pkill", "-f", f"{APP}/Contents/MacOS"], check=False)
         time.sleep(1)
-        subprocess.run(["pkill", "-f", "codex-app/bridge.py"], check=False)
+        subprocess.run(["pkill", "-f", BRIDGE_PY], check=False)
         time.sleep(1)
         subprocess.run(["open", APP], check=False)
         for _ in range(120):

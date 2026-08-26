@@ -19,7 +19,7 @@ every trade-off and the upstream bugs that forced them.
 
 ## Use the CLI — do not hand-roll the startup
 
-    ~/Documents/codex-app/bin/codex-run
+    <repo>/bin/codex-run
 
 **Always drive Codex through this.** Every subcommand preflights: it launches
 `Wheelhouse.app` if it is not running, waits for the bridge, then acts. Starting
@@ -304,7 +304,7 @@ write with
 
     fatal: Unable to create '<path>/.git/index.lock': Operation not permitted
 
-Observed: a replay job was pointed at a sandbox under `~/Documents/codex-app/`
+Observed: a replay job was pointed at a sandbox under the tool's own directory
 while its thread's cwd was a different project. Every read worked;
 the first `git` operation failed.
 
@@ -326,7 +326,7 @@ so the next `codex-run new` could fail to find the thread and split the chat
 across two.
 
 A thread's project is now **pinned once**, when `codex-run` first creates or
-resolves it, in `~/Documents/codex-app/state/projects.json`. The bridge serves
+resolves it, in `<repo>/state/projects.json`. The bridge serves
 that at `/projects`, the sidebar groups on it, and nothing a turn does can move
 it. This is automatic — if you go through the CLI there is nothing to remember.
 

@@ -31,6 +31,11 @@ down. If a bridge is already listening on 8770, the app reuses it.
 
     bin/codex-run say "read the README and summarise it"
 
+Put it on your PATH if you want it everywhere; it resolves its own location
+through symlinks, so the repo can live anywhere:
+
+    ln -s "$PWD/bin/codex-run" /usr/local/bin/codex-run
+
 Every verb is idempotent and self-healing: each one ensures the app and bridge
 are up before it does anything, so there is no separate start step and repeated
 invocations converge rather than duplicate.
