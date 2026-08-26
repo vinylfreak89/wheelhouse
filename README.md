@@ -36,6 +36,30 @@ through symlinks, so the repo can live anywhere:
 
     ln -s "$PWD/bin/codex-run" ~/.local/bin/codex-run
 
+### Task files
+
+A task file is a plain text file whose entire contents become the prompt for one
+turn. There is no format -- no frontmatter, no schema, no directives. It is read
+and sent verbatim.
+
+    codex-run task <id> brief.txt --effort xhigh --cwd ~/some/project
+
+It exists because anything worth handing to another agent is usually several
+paragraphs -- background, constraints, an explicit output contract -- and
+passing that as a shell argument is unreadable and invites quoting bugs. A file
+is also reviewable before you send it and reusable afterwards.
+
+`say` is the inline equivalent for one-liners. `task` adds what a longer
+dispatch needs: `--skill NAME` attaches a skill to the turn, `--effort` sets
+reasoning effort, and `--cwd` scopes where the turn may write (under
+`workspace-write` an agent reads almost anywhere but writes only beneath its
+cwd, so work in a sandbox or worktree needs this or every write fails). It
+blocks until the turn ends, then prints the reply.
+
+`on-file <path> <id> <file>` sends the same kind of file, but waits for `<path>`
+to appear and stop changing first -- for handing over work that depends on a
+long-running job finishing.
+
 ### It does not need the GUI
 
 The CLI prefers the window when a bundle is present, but does not depend on it.
@@ -55,7 +79,7 @@ invocations converge rather than duplicate.
 
     codex-run new                  reuse-or-create this chat's thread
     codex-run say "<text>"         send a turn, wait, print the reply
-    codex-run task <id> <file>     send a task file  [--effort E] [--cwd DIR]
+    codex-run task <id> <file>     send a task file (see below)
     codex-run watch <id>           follow status, sub-agents, tokens
     codex-run steer <id> "<text>"  type into a RUNNING turn
     codex-run rename [<id>] "<n>"  retitle a thread
