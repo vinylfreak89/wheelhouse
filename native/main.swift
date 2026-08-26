@@ -13,7 +13,20 @@ import AppKit
 import WebKit
 
 let PORT = 8770
-let BRIDGE = "\(NSHomeDirectory())/Documents/codex-app/bridge.py"
+// Resolve bridge.py without assuming where this checkout lives: an explicit
+// override first, then the directory holding the .app (the usual layout when
+// built in-tree), then the historical default.
+let BRIDGE: String = {
+    let fm = FileManager.default
+    var tries: [String] = []
+    if let env = ProcessInfo.processInfo.environment["CODEX_APP_DIR"] {
+        tries.append("\(env)/bridge.py")
+    }
+    let appDir = Bundle.main.bundleURL.deletingLastPathComponent().path
+    tries.append("\(appDir)/bridge.py")
+    tries.append("\(NSHomeDirectory())/Documents/codex-app/bridge.py")
+    return tries.first(where: { fm.fileExists(atPath: $0) }) ?? tries.last!
+}()
 
 final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow!

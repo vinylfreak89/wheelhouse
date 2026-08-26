@@ -1,49 +1,106 @@
 # Wheelhouse
 
-A native macOS client for the Codex app-server, built because the official
-desktop app cannot display threads created on a remote host and offers no way to
-start one (openai/codex #27284, #22438, #24280).
+A native macOS client for the `codex` app-server, plus a CLI and a Claude Code
+skill for driving it. Built because the official desktop app could not display
+threads created on a remote host and offered no way to start one
+(openai/codex #27284, #22438, #24280).
 
     NSWindow + WKWebView  ->  bridge.py (127.0.0.1:8770)  ->  codex app-server
 
-## Run
+`codex` ships a documented app-server speaking newline-delimited JSON-RPC over
+stdio. The bridge owns exactly one as a child process and multiplexes it, so the
+GUI and any number of CLI callers share a single server and a single view of
+state.
 
-    open ~/.claude/skills/codex-run/Wheelhouse.app
+## Requirements
+
+- macOS 13+
+- `codex` on PATH, authenticated (`~/.codex/auth.json`)
+- `python3`
+- Xcode or the Swift toolchain, to build the app
+
+## Build and run
+
+    ./build.sh
+    open Wheelhouse.app
 
 The app starts the bridge, which starts `codex app-server`. Quitting takes both
-down. If a bridge is already listening on 8770 the app reuses it.
+down. If a bridge is already listening on 8770, the app reuses it.
 
-Requires: `codex` on PATH (brew cask), `python3`, and `~/.codex/auth.json`.
+## The CLI
 
-## What it does
+    bin/codex-run say "read the README and summarise it"
 
-- **Projects / Running / Done** sidebar, grouped by working directory
-- **Model, reasoning effort, service tier, approvals** — all model-driven from
-  `model/list`, showing the *resolved* default rather than the word "default"
-- **Live streaming**: agent text, reasoning, command execution with output,
-  updated in place as `item/started` → `item/completed` arrive
-- **Steering**: typing while a turn runs sends `turn/steer` into the running
-  turn instead of queueing a new one
-- **Approvals** render inline with Approve/Deny when policy isn't `never`
-- **Protocol pane** (`protocol` button): every JSON-RPC frame in and out
+Every verb is idempotent and self-healing: each one ensures the app and bridge
+are up before it does anything, so there is no separate start step and repeated
+invocations converge rather than duplicate.
+
+    codex-run new                  reuse-or-create this chat's thread
+    codex-run say "<text>"         send a turn, wait, print the reply
+    codex-run task <id> <file>     send a task file  [--effort E] [--cwd DIR]
+    codex-run watch <id>           follow status, sub-agents, tokens
+    codex-run steer <id> "<text>"  type into a RUNNING turn
+    codex-run rename [<id>] "<n>"  retitle a thread
+    codex-run project              show/set the project a thread displays under
+    codex-run list | read | info | agents | errors | archive | rm
+
+Run it with no arguments for the full set.
+
+### Threads belong to projects, not directories
+
+Codex persists a turn's `cwd` into `threads.cwd`. Grouping the sidebar on that
+column means passing `--cwd` to write into a scratch directory silently
+relocates the whole conversation. Here a thread's project is bound **once**, in
+a local registry the bridge serves at `/projects`, and nothing a turn does can
+move it. Thread names are cosmetic for the same reason: resolution goes through
+that registry, so renaming a thread cannot orphan it.
+
+## The GUI
+
+- **Projects / Running / Done / Agents** sidebar, sub-agents nested under their
+  parent thread
+- **Model, reasoning effort, service tier, approvals** — model-driven from
+  `model/list`, showing the *resolved* value rather than the word "default"
+- **Live streaming** of agent text, reasoning, and command execution with output
+- **Steering**: typing while a turn runs sends `turn/steer` into that turn
+  rather than queueing a new one
+- **Approvals** inline, with the correct per-method decision vocabulary
+- **Protocol pane**: every JSON-RPC frame in and out
 - **Usage**: 5-hour and weekly rate-limit windows with reset times
-- **Rename / Archive / Delete** via right-click on a thread
 
-Enter sends, Shift+Enter makes a newline. ⌘N new thread, ⌘R reload, ⌘Q quit.
+The conversation renders entirely from the rollout JSONL on disk rather than a
+client-side cache — the cache was the single root cause of missing, duplicated,
+out-of-order and mis-timestamped messages.
 
-## Files
+Enter sends, Shift+Enter newlines. ⌘N new thread, ⌘R reload, ⌘Q quit.
 
-    Wheelhouse.app        the bundle (unsigned)
+## The skill
+
+`.claude/skills/codex-run/SKILL.md` teaches Claude Code to hand work to Codex
+and supervise it. It mostly encodes failure modes that cost real time: restarting
+kills running turns, Codex cannot wait for anything, writes are scoped to the
+turn's cwd while reads are not.
+
+## Configuration
+
+| | |
+|---|---|
+| `CODEX_SKILL_ROOTS` | extra skill directories, colon-separated |
+| `CODEX_DEFAULT_CWD` | default working directory for new threads |
+| `CODEX_EFFORT` | default reasoning effort (default `xhigh`) |
+| `CODEX_APP_DIR` | where to find `bridge.py` |
+| `state/skill-roots.json` | extra skill roots, as a local file |
+
+`state/` is machine-local and gitignored.
+
+## Layout
+
+    bin/codex-run      the CLI
     bridge.py          HTTP/SSE <-> app-server stdio bridge
-    ui/index.html      the whole UI, no build step, no dependencies
+    ui/index.html      the whole UI: no build step, no dependencies
     native/main.swift  NSWindow + WKWebView shell and menu bar
+    build.sh           builds Wheelhouse.app
 
-## Driving it from Claude
+## License
 
-The protocol has no thread ownership model, so Claude can attach to the same
-app-server the UI is watching:
-
-    curl -s -XPOST 127.0.0.1:8770/rpc -H 'Content-Type: application/json' \
-      -d '{"method":"thread/list","params":{"limit":10}}'
-
-Anything Claude does shows up live in the window.
+MIT. Not affiliated with OpenAI.
