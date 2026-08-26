@@ -7,6 +7,7 @@ Every subcommand runs the same preflight: GUI up, bridge ready, then act.
 
   codex-run up                       ensure Wheelhouse.app + bridge are running
   codex-run new [cwd]                reuse-or-create THIS CHAT's thread, print id
+  codex-run rename [<id>] "<name>"   retitle a thread (safe: resolution is by chat)
   codex-run project [--name N]       show/set the project a thread displays under
   codex-run project --repair         pin any threads created before the registry
                                      (the name is always the chat title -- it is
@@ -210,6 +211,7 @@ def bind_project(tid, root=None, name=None):
         entry = {"root": (entry or {}).get("root", root) if not name else root,
                  "name": name or reg["roots"].get(root) or project_name(root)}
         reg["threads"][tid] = entry
+    entry.setdefault("chat", chat_title() or "")
     reg["roots"].setdefault(entry["root"], entry["name"])
     _registry_save(reg)
     return entry
@@ -223,24 +225,41 @@ DEFAULT_EFFORT = os.environ.get("CODEX_EFFORT", "xhigh")
 
 
 def find_thread(name, cwd=None):
-    """An existing thread with this name in this cwd, most recent first.
+    """The thread belonging to this chat, in this project.
 
-    One chat should map to ONE Codex thread. Creating a second thread with the
-    same name splits the conversation and loses the context the user is watching.
+    Resolution goes through the registry, keyed by the CHAT the thread was
+    created for -- not by the thread's display name. Names are cosmetic and the
+    owner may retype one at any moment; if resolution depended on them, a rename
+    would orphan the thread and the next `new` would silently start a second one.
+    Falls back to name matching for threads that predate the registry.
     """
     want_cwd = project_cwd(cwd)
     reg = _registry()["threads"]
+    live = {t["id"]: t for t in rpc("thread/list", {"limit": 100}, 40).get("data", [])}
+
+    def recency(tid):
+        t = live.get(tid) or {}
+        return t.get("recencyAt") or t.get("updatedAt") or 0
+
     best, best_ts = None, -1
-    for t in rpc("thread/list", {"limit": 100}, 40).get("data", []):
+    for tid, e in reg.items():
+        if tid not in live:                     # archived or deleted
+            continue
+        if e.get("chat") != name or e.get("root") != want_cwd:
+            continue
+        if recency(tid) > best_ts:
+            best, best_ts = tid, recency(tid)
+    if best:
+        return best
+
+    for tid, t in live.items():
         if (t.get("name") or "") != name:
             continue
-        pinned = (reg.get(t["id"]) or {}).get("root")
-        home = pinned or t.get("cwd") or want_cwd
-        if home != want_cwd:
+        pinned = (reg.get(tid) or {}).get("root")
+        if (pinned or t.get("cwd") or want_cwd) != want_cwd:
             continue
-        ts = t.get("recencyAt") or t.get("updatedAt") or 0
-        if ts > best_ts:
-            best, best_ts = t["id"], ts
+        if recency(tid) > best_ts:
+            best, best_ts = tid, recency(tid)
     return best
 
 
@@ -392,6 +411,20 @@ def main():
         if t:
             bind_project(t)            # lazily pin threads created before this
         print(t if t else "(none yet)")
+    elif c == "rename":
+        # Names are cosmetic: resolution goes through the registry's chat
+        # binding, so retyping one cannot lose the thread.
+        if len(a) >= 3:
+            tid, nm = a[1], a[2]
+        else:
+            tid, nm = find_thread(default_name()), a[1]
+        if not tid:
+            sys.exit("no thread for this chat yet")
+        rpc("thread/name/set", {"threadId": tid, "name": nm}, 30)
+        got = (rpc("thread/read", {"threadId": tid}, 30).get("thread") or {}).get("name")
+        if got != nm:
+            sys.exit(f"rename did not stick: still {got!r}")
+        print(f"renamed -> {got}")
     elif c == "project":
         if "--name" in a:
             nm = a[a.index("--name") + 1]

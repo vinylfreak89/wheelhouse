@@ -334,6 +334,18 @@ it. This is automatic — if you go through the CLI there is nothing to remember
     codex-run project --name NAME  # override (two checkouts, same basename)
     codex-run project --repair     # pin threads created before the registry
 
+### Thread names are cosmetic — resolution is not
+
+`codex-run rename [<id>] "<name>"` retitles a thread. It is safe to do at any
+time, including on a thread mid-turn, because `find_thread` resolves through
+the registry's **chat** binding rather than the thread's display name. That
+binding is recorded when the thread is first created or resolved.
+
+This was not always true: resolution used to match the display name against the
+chat title, so a single rename would orphan the thread and the next `new` would
+quietly open a second one. If you touch that code path, keep the property and
+test it by exercising it — rename, re-resolve, assert the id is unchanged.
+
 The displayed name is the project directory's **basename** — the same name
 Claude Code shows. Claude Code has no separate project-name record: a project
 IS a cwd, so the basename is authoritative rather than a guess. Do not derive a
