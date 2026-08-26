@@ -16,6 +16,9 @@ sandbox/
 # Owner's internal worklog, not documentation.
 DECISIONS.md
 
+# Drop-in skills are machine-local by nature: whatever you put here is yours,
+# not part of the tool. The directory's purpose is documented in skills/README.md.
+skills/*/
+
 # Scaffolding for a private experiment, not part of the tool.
 REPLAY-HANDOFF.md
-skills/replay-*/
