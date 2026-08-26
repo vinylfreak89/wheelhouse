@@ -80,21 +80,58 @@ def gui_running():
     return bool(out.stdout.strip())
 
 
+def bridge_up_headless(quiet=False):
+    """Run bridge.py ourselves, detached, with no window.
+
+    Redirect to /dev/null and start a new session so the bridge outlives this
+    process -- otherwise every CLI invocation would kill the server it just
+    started.
+    """
+    if not os.path.isfile(BRIDGE_PY):
+        sys.exit(f"no bridge at {BRIDGE_PY}")
+    if not quiet:
+        print("starting bridge (headless) ...")
+    devnull = open(os.devnull, "wb")
+    subprocess.Popen([sys.executable, BRIDGE_PY],
+                     stdout=devnull, stderr=devnull, stdin=subprocess.DEVNULL,
+                     start_new_session=True, cwd=ROOT)
+
+
 def up(quiet=False):
-    """Ensure the GUI is running -- not just the bridge. The window IS the point."""
-    if gui_running() and alive():
-        if not quiet: print("already up")
+    """Ensure the bridge is reachable, with or without a window.
+
+    The GUI is preferred when a bundle exists -- the window is the point -- but
+    the CLI must not depend on it: over SSH, on a machine where the app was
+    never built, or when $CODEX_HEADLESS=1, run bridge.py directly instead.
+
+    Keyed on the bridge being ALIVE rather than on the GUI being up. A running
+    GUI whose bridge has died used to take the launch branch, do nothing (the
+    app was already open), then wait a full minute for a server nothing was
+    going to start.
+    """
+    if alive():
+        if not quiet:
+            print("already up")
         return
-    if not gui_running():
-        if not quiet: print("launching Wheelhouse.app ...")
+    headless = (os.environ.get("CODEX_HEADLESS") == "1"
+                or not os.path.isdir(APP))
+    if headless or gui_running():
+        # gui_running() here means the app is up but its bridge is not
+        # answering -- starting our own is the only way to recover in-process.
+        bridge_up_headless(quiet)
+    else:
+        if not quiet:
+            print("launching Wheelhouse.app ...")
         subprocess.run(["open", APP], check=False)
     for _ in range(120):                       # ~60s
         if alive():
-            if not quiet: print("bridge ready")
+            if not quiet:
+                print("bridge ready")
             return
         time.sleep(0.5)
-    sys.exit(f"bridge did not come up on {PORT}. Debug:\n"
-             f"  python3 {BRIDGE_PY}")
+    hint = ("the app is running but its bridge is not answering; quit and reopen it"
+            if gui_running() else f"try: python3 {BRIDGE_PY}")
+    sys.exit(f"bridge did not come up on {PORT}. {hint}")
 
 
 def rpc(method, params=None, timeout=300):

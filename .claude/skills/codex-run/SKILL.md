@@ -22,7 +22,9 @@ every trade-off and the upstream bugs that forced them.
     <repo>/bin/codex-run
 
 **Always drive Codex through this.** Every subcommand preflights: it launches
-`Wheelhouse.app` if it is not running, waits for the bridge, then acts. Starting
+`Wheelhouse.app` if it is not running, waits for the bridge, then acts. With no
+bundle present, or under `CODEX_HEADLESS=1`, it runs `bridge.py` itself instead,
+so the CLI works with no window at all. Starting
 `bridge.py` directly also "works" and is WRONG — it leaves the user with no
 window to watch, which is the entire point of this setup.
 

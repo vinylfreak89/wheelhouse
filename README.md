@@ -31,10 +31,23 @@ down. If a bridge is already listening on 8770, the app reuses it.
 
     bin/codex-run say "read the README and summarise it"
 
-Put it on your PATH if you want it everywhere; it resolves its own location
+Put it on your PATH if you want it everywhere. It resolves its own location
 through symlinks, so the repo can live anywhere:
 
-    ln -s "$PWD/bin/codex-run" /usr/local/bin/codex-run
+    ln -s "$PWD/bin/codex-run" ~/.local/bin/codex-run
+
+### It does not need the GUI
+
+The CLI prefers the window when a bundle is present, but does not depend on it.
+With no `Wheelhouse.app` built -- over SSH, on a headless box, or when you
+simply do not want a window -- it runs `bridge.py` itself:
+
+    CODEX_HEADLESS=1 codex-run say "what changed in the last commit?"
+
+The bridge is started detached, so it outlives the invocation that started it
+and later calls reuse it. `codex-run` is a single stdlib-only Python script
+with no third-party dependencies; the only requirements are `python3` and an
+authenticated `codex`.
 
 Every verb is idempotent and self-healing: each one ensures the app and bridge
 are up before it does anything, so there is no separate start step and repeated
@@ -93,7 +106,8 @@ turn's cwd while reads are not.
 | `CODEX_SKILL_ROOTS` | extra skill directories, colon-separated |
 | `CODEX_DEFAULT_CWD` | default working directory for new threads |
 | `CODEX_EFFORT` | default reasoning effort (default `xhigh`) |
-| `CODEX_APP_DIR` | where to find `bridge.py` |
+| `CODEX_APP_DIR` | where to find `bridge.py` and the app bundle |
+| `CODEX_HEADLESS` | `1` runs the bridge without the GUI |
 | `state/skill-roots.json` | extra skill roots, as a local file |
 
 `state/` is machine-local and gitignored.
