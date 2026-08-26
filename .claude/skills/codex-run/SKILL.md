@@ -317,6 +317,29 @@ directory as the turn's cwd:**
 that turn — use the turn-level override so one chat keeps one thread while
 still writing into a sandbox.
 
+### `--cwd` moves the writes, NOT the conversation
+
+Codex persists a turn's `cwd` into `threads.cwd`. The sidebar used to group on
+that column, so one `--cwd` into a scratch directory silently relocated the
+whole conversation out of its project — and `find_thread` matched on cwd too,
+so the next `codex-run new` could fail to find the thread and split the chat
+across two.
+
+A thread's project is now **pinned once**, when `codex-run` first creates or
+resolves it, in `~/Documents/codex-app/state/projects.json`. The bridge serves
+that at `/projects`, the sidebar groups on it, and nothing a turn does can move
+it. This is automatic — if you go through the CLI there is nothing to remember.
+
+    codex-run project              # name, root, and this chat's pinned thread
+    codex-run project --name NAME  # override (two checkouts, same basename)
+    codex-run project --repair     # pin threads created before the registry
+
+The displayed name is the project directory's **basename** — the same name
+Claude Code shows. Claude Code has no separate project-name record: a project
+IS a cwd, so the basename is authoritative rather than a guess. Do not derive a
+prettier name from `CLAUDE.md` or anywhere else; the sidebar shows the name and
+keeps the full path in the tooltip.
+
 ## Gotchas that will cost you an hour each
 
 1. **`thread/list` returns results under `result.data`** — not `.threads` or

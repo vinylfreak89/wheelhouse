@@ -215,6 +215,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._transcript()
         if self.path.startswith("/itemtimes"):
             return self._itemtimes()
+        if self.path == "/projects":
+            return self._projects()
         if self.path.startswith("/threadmeta"):
             return self._threadmeta()
         if self.path == "/reload":
@@ -394,6 +396,22 @@ class Handler(BaseHTTPRequestHandler):
             out["error"] = str(e)
         return self._send(200, json.dumps(out).encode())
 
+    # A thread's project is pinned in the registry that bin/codex-run writes.
+    # threads.cwd is NOT it: a turn's --cwd overwrites that column, which used
+    # to drag the conversation into whatever directory the work touched.
+    REGISTRY = os.path.expanduser("~/Documents/codex-app/state/projects.json")
+
+    def _registry(self):
+        try:
+            with open(self.REGISTRY, encoding="utf-8") as f:
+                r = json.load(f)
+            return r if isinstance(r, dict) else {}
+        except Exception:
+            return {}
+
+    def _projects(self):
+        return self._send(200, json.dumps(self._registry()).encode())
+
     def _threadmeta(self):
         """Effective per-thread settings. The protocol's thread object does not
         report model / sandbox / approval / reasoning effort, but the state DB
@@ -421,6 +439,14 @@ class Handler(BaseHTTPRequestHandler):
             c.close()
         except Exception as e:
             out = {"error": str(e)}
+        pin = (self._registry().get("threads") or {}).get(tid)
+        if pin:
+            out["project"] = pin.get("name")
+            out["project_root"] = pin.get("root")
+        else:                      # unpinned: fall back to the folder it runs in
+            root = out.get("cwd") or ""
+            out["project_root"] = root
+            out["project"] = os.path.basename(root.rstrip("/")) or "(no project)"
         return self._send(200, json.dumps(out).encode())
 
     def _sse(self):

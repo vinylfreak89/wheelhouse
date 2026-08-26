@@ -7,6 +7,8 @@ Every subcommand runs the same preflight: GUI up, bridge ready, then act.
 
   codex-run up                       ensure Wheelhouse.app + bridge are running
   codex-run new [cwd]                reuse-or-create THIS CHAT's thread, print id
+  codex-run project [--name N]       show/set the project a thread displays under
+  codex-run project --repair         pin any threads created before the registry
                                      (the name is always the chat title -- it is
                                       deliberately not overridable; one chat maps
                                       to exactly one Codex thread)
@@ -148,6 +150,75 @@ def project_cwd(explicit=None):
     return os.path.abspath(explicit or os.environ.get("CODEX_CWD") or os.getcwd())
 
 
+# ---------------------------------------------------------------- projects
+# A thread belongs to a PROJECT. That binding is made once, when the thread is
+# created, and nothing may move it afterwards -- in particular not a turn's
+# --cwd, which Codex persists into threads.cwd and which the sidebar was
+# grouping on. Writing work into another directory is routine; it must not
+# relocate the conversation.
+REGISTRY = os.path.expanduser("~/Documents/codex-app/state/projects.json")
+
+
+def _registry():
+    try:
+        with open(REGISTRY, encoding="utf-8") as f:
+            r = json.load(f)
+        if isinstance(r, dict):
+            r.setdefault("threads", {})
+            r.setdefault("roots", {})
+            return r
+    except Exception:
+        pass
+    return {"threads": {}, "roots": {}}
+
+
+def _registry_save(reg):
+    os.makedirs(os.path.dirname(REGISTRY), exist_ok=True)
+    tmp = REGISTRY + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(reg, f, indent=2, sort_keys=True)
+    os.replace(tmp, REGISTRY)          # atomic; never a half-written registry
+
+
+def project_name(root=None):
+    """The project's name, the same one Claude Code shows: its directory's
+    basename. Claude Code has no separate project-name record -- a project IS
+    a cwd -- so the basename is the authoritative name, not a guess. The
+    sidebar shows this; the full path stays in the tooltip.
+
+    $CODEX_PROJECT and `codex-run project --name` override it for the odd case
+    where two checkouts share a basename.
+    """
+    root = os.path.abspath(root or project_cwd())
+    env = (os.environ.get("CODEX_PROJECT") or "").strip()
+    if env:
+        return env
+    named = _registry()["roots"].get(root)
+    if named:
+        return named
+    return os.path.basename(root.rstrip("/")) or "codex"
+
+
+def bind_project(tid, root=None, name=None):
+    """Pin a thread to a project. First binding wins unless a name is forced."""
+    root = os.path.abspath(root or project_cwd())
+    reg = _registry()
+    if name:
+        reg["roots"][root] = name
+    entry = reg["threads"].get(tid)
+    if entry is None or name:
+        entry = {"root": (entry or {}).get("root", root) if not name else root,
+                 "name": name or reg["roots"].get(root) or project_name(root)}
+        reg["threads"][tid] = entry
+    reg["roots"].setdefault(entry["root"], entry["name"])
+    _registry_save(reg)
+    return entry
+
+
+def project_of(tid):
+    return _registry()["threads"].get(tid)
+
+
 DEFAULT_EFFORT = os.environ.get("CODEX_EFFORT", "xhigh")
 
 
@@ -158,11 +229,14 @@ def find_thread(name, cwd=None):
     same name splits the conversation and loses the context the user is watching.
     """
     want_cwd = project_cwd(cwd)
+    reg = _registry()["threads"]
     best, best_ts = None, -1
     for t in rpc("thread/list", {"limit": 100}, 40).get("data", []):
         if (t.get("name") or "") != name:
             continue
-        if (t.get("cwd") or want_cwd) != want_cwd:
+        pinned = (reg.get(t["id"]) or {}).get("root")
+        home = pinned or t.get("cwd") or want_cwd
+        if home != want_cwd:
             continue
         ts = t.get("recencyAt") or t.get("updatedAt") or 0
         if ts > best_ts:
@@ -175,6 +249,7 @@ def new(name, cwd=None, model=None, effort=None, sandbox="workspace-write",
     if reuse:
         existing = find_thread(name, cwd)
         if existing:
+            bind_project(existing, cwd)
             return existing
     effort = effort or DEFAULT_EFFORT
     p = {"cwd": project_cwd(cwd), "sandbox": sandbox,
@@ -187,6 +262,7 @@ def new(name, cwd=None, model=None, effort=None, sandbox="workspace-write",
     if not tid:
         sys.exit("thread/start returned no id: " + json.dumps(res)[:200])
     rpc("thread/name/set", {"threadId": tid, "name": name}, 30)
+    bind_project(tid, cwd)
     return tid
 
 
@@ -313,7 +389,35 @@ def main():
     elif c == "name":  print(default_name())
     elif c == "tid":
         t = find_thread(default_name())
+        if t:
+            bind_project(t)            # lazily pin threads created before this
         print(t if t else "(none yet)")
+    elif c == "project":
+        if "--name" in a:
+            nm = a[a.index("--name") + 1]
+            reg = _registry()
+            reg["roots"][project_cwd()] = nm       # the root is the real subject
+            for tid, e in reg["threads"].items():
+                if e.get("root") == project_cwd():
+                    e["name"] = nm
+            _registry_save(reg)
+            print(f"project name set: {nm}")
+        elif "--repair" in a:
+            fixed = 0
+            for t in rpc("thread/list", {"limit": 200}, 40).get("data", []):
+                if not project_of(t["id"]):
+                    bind_project(t["id"], t.get("cwd") or project_cwd())
+                    fixed += 1
+            print(f"bound {fixed} previously-unpinned thread(s)")
+        else:
+            root = project_cwd()
+            print(f"name : {project_name(root)}")
+            print(f"root : {root}")
+            tid = find_thread(default_name())
+            print(f"thread: {tid or '(none yet)'}")
+            if tid:
+                e = bind_project(tid)              # pin lazily on first look
+                print(f"pinned: {e.get('name')}  <-  {e.get('root')}")
     elif c == "new":
         # name is ALWAYS the chat title -- not overridable on purpose
         cwd = a[1] if len(a) > 1 else None

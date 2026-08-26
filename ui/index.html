@@ -402,14 +402,30 @@ async function cwdOf(id){
   return cwdCache[id];
 }
 const nameCache={};
+/* A thread's PROJECT is pinned by bin/codex-run and served from /projects.
+   It is deliberately not threads.cwd: a turn's --cwd overwrites that column,
+   which used to drag a conversation into whatever directory the work touched. */
+let projReg={threads:{},roots:{}};
+async function loadProjects(){
+  try{ projReg=await (await fetch("/projects")).json()||{}; }catch(e){}
+  projReg.threads??={}; projReg.roots??={};
+}
+const base=p=>(p||"").replace(/\/+$/,"").split("/").pop()||"";
+function projRootOf(id){ return (projReg.threads[id]||{}).root || cwdCache[id] || ""; }
+function projOf(id){
+  const pin=projReg.threads[id];
+  if(pin&&pin.name) return pin.name;
+  return base(cwdCache[id])||"(no project)";
+}
 async function loadThreads(){
   const r=await rpc("thread/list",{limit:100});
   threads=(r.result&&r.result.data)||[];
+  await loadProjects();
   await Promise.all(threads.slice(0,60).map(t=>cwdOf(t.id).catch(()=>"")));
   const running=threads.filter(t=>isActive(t)).length;
   $("#nR").textContent=running?` ${running}`:"";
   $("#nD").textContent=threads.length?` ${threads.length-running}`:"";
-  const projs=new Set(threads.map(t=>cwdCache[t.id]||"")); projs.delete("");
+  const projs=new Set(threads.map(t=>projOf(t.id))); projs.delete("(no project)");
   $("#nP").textContent=projs.size?` ${projs.size}`:"";
   renderList();
 }
@@ -514,10 +530,12 @@ function renderList(){
   }
   if(tab==="projects"){
     const groups={};
-    for(const t of rows){ const k=cwdCache[t.id]||"(no directory)"; (groups[k]??=[]).push(t); }
+    const roots={};
+    for(const t of rows){ const k=projOf(t.id); (groups[k]??=[]).push(t); roots[k]??=projRootOf(t.id); }
     for(const k of Object.keys(groups).sort()){
       const g=document.createElement("div"); g.className="grp";
-      g.textContent=k.replace(/^\/Users\/[^/]+\//,"~/"); g.title=k;
+      g.textContent=k;                       /* the name, not the path */
+      g.title=(roots[k]||"").replace(/^\/Users\/[^/]+\//,"~/");
       listEl.append(g);
       groups[k].forEach(t=>listEl.append(row(t)));
     }
