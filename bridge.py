@@ -410,7 +410,10 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def _projects(self):
-        return self._send(200, json.dumps(self._registry()).encode())
+        reg = self._registry()
+        reg["defaultCwd"] = (os.environ.get("CODEX_DEFAULT_CWD")
+                             or os.path.expanduser("~"))
+        return self._send(200, json.dumps(reg).encode())
 
     def _threadmeta(self):
         """Effective per-thread settings. The protocol's thread object does not

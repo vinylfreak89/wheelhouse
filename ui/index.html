@@ -260,7 +260,7 @@ let cur=null, curInfo={}, busy=false, streamEl=null, reasonEl=null;
 let curTurn=null;                 // active turn id: turn/steer and turn/interrupt both need it
 let threads=[], tab="projects", models=[], wirePaused=false;
 const cwdCache={};
-let DEFAULT_CWD="";        /* set from the bridge once available */
+let DEFAULT_CWD="";        /* supplied by the bridge; see loadProjects */
 
 async function rpc(method,params,timeout){
   try{
@@ -409,6 +409,7 @@ let projReg={threads:{},roots:{}};
 async function loadProjects(){
   try{ projReg=await (await fetch("/projects")).json()||{}; }catch(e){}
   projReg.threads??={}; projReg.roots??={};
+  if(projReg.defaultCwd) DEFAULT_CWD=projReg.defaultCwd;
 }
 const base=p=>(p||"").replace(/\/+$/,"").split("/").pop()||"";
 function projRootOf(id){ return (projReg.threads[id]||{}).root || cwdCache[id] || ""; }
