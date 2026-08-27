@@ -258,6 +258,39 @@ Failures observed building this loop, each of which the protocol below prevents:
    you will forget. Codex went idle for a full exchange once while the driver
    kept saying "still running", because nothing was watching it.
 
+### Close the loop yourself — settle it, then narrate
+
+When the other agent's critique conflicts with your evidence, do not hand the
+user a choice between two positions. Run the experiment that decides it and
+send the result back. Keep the user informed of the exchange and its outcome;
+what they should not have to do is adjudicate.
+
+The exchange that works has four parts:
+
+1. **Concede what actually lands, by name.** Quote the specific claim you are
+   accepting rather than gesturing at "good points".
+2. **Falsify with a decomposition, not an argument.** If the critique says two
+   factors were confounded, vary them one at a time. A measured `0.000e+00` on
+   the factor it blamed ends the discussion; a paragraph does not.
+3. **Separate the process criticism from the mechanism.** These come apart, and
+   the distinction matters: an objection that you failed to isolate two
+   variables can be entirely correct while the confound it names turns out to
+   have zero magnitude. You were then right for inadequate reasons, which is
+   worth saying out loud.
+4. **Ask questions that can be ANSWERED, not agreed with.** "Does this change
+   your conclusion?" invites assent. "Under your own standard, what concrete
+   test would make this creditable, in a form I can run?" produces a design.
+
+Expect to be corrected in return, including on things you asserted while
+conceding. A good counterpart also corrects ITS OWN earlier work: in one
+exchange it withdrew two named sentences of its critique AND independently
+tightened a validity gate it had specified itself, which retroactively weakened
+its own falsification. That is the loop working.
+
+**Do not relay a disagreement upward as a decision.** The user asked for the
+two agents to fight it out and reach agreement; a summary of who was right about
+what is strictly less useful than a settled answer plus the evidence.
+
 ### Take the tree lock before writing a shared checkout
 
 Both sides write the same working tree: you edit files directly, and a Codex
