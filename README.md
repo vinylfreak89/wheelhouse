@@ -133,6 +133,7 @@ turn's cwd while reads are not.
 | `CODEX_APP_DIR` | where to find `bridge.py` and the app bundle |
 | `CODEX_HEADLESS` | `1` runs the bridge without the GUI |
 | `state/skill-roots.json` | extra skill roots, as a local file |
+| `.claude/skills/codex-run/LOCAL.md` | optional gitignored operator/project overlay for the Claude skill |
 
 `state/` is machine-local and gitignored.
 

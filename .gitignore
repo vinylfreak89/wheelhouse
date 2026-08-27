@@ -9,6 +9,9 @@ __pycache__/
 # Contains local paths and thread ids. Never published.
 state/
 
+# Operator-specific additions to the public codex-run skill.
+.claude/skills/codex-run/LOCAL.md
+
 # Private working material. NOT part of the tool and must never enter
 # history -- it holds an extracted research corpus.
 sandbox/

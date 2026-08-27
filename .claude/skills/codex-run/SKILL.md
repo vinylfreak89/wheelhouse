@@ -5,6 +5,18 @@ description: Hand work to OpenAI Codex from Claude and watch it run in the Wheel
 
 # Running work on Codex
 
+## Load the local overlay first
+
+If `LOCAL.md` exists beside this file, read it completely before acting. It
+contains operator- and project-specific additions that do not belong in the
+public skill. Treat its instructions as more specific than this file when they
+overlap.
+
+`LOCAL.md` is deliberately gitignored. Never stage it, copy its contents into
+the public skill, or include its private details in a dispatch unless the user
+explicitly asks for that disclosure. `LOCAL.example.md` documents the supported
+shape without carrying anyone's local policy.
+
 Codex is driven through the **app-server JSON-RPC protocol**, not the CLI and not
 the official desktop app. A local bridge exposes it over HTTP so both Claude and
 the GUI can drive the *same* server — the protocol has no thread ownership
@@ -43,7 +55,7 @@ right project group and the sandbox is scoped to that project. Pass an explicit
 cwd only to override.
 
 **Names are automatic and should stay that way.** `codex-run` names a thread
-after **this chat** — e.g. `Llama-Guard local model setup` — read from the title
+after **this chat** — e.g. `API migration review` — read from the title
 of the Claude session whose `cwd` matches, in
 `~/Library/Application Support/Claude/claude-code-sessions/*/*/*.json`. The user
 should be able to look at a Codex thread and know which conversation spawned it.
@@ -80,13 +92,13 @@ API** — the sidebar groups by `cwd`, so set `cwd` to the project directory.
 
 ## Do NOT restate what Codex already loads
 
-`AGENTS.md` in this project is a **symlink to CLAUDE.md** — byte identical.
-Codex reads it automatically on every thread. Everything in it is already in
-context: project conventions, hard rules, directory layout, the lot.
+Codex reads applicable `AGENTS.md` instructions automatically on every thread.
+Everything in them is already in context: project conventions, hard rules,
+directory layout, and scoped guidance.
 
 So a dispatch must NOT re-state:
   * project conventions or coding standards
-  * "never touch /Volumes/T7", sandbox etiquette, or anything else in CLAUDE.md
+  * sandbox etiquette or other instructions already in `AGENTS.md`
   * background about the project
 
 Repeating it wastes tokens on every turn AND dilutes the actual instruction —
@@ -98,30 +110,10 @@ A dispatch should carry ONLY what is genuinely new to this task:
   3. anything that CONTRADICTS or narrows the standing instructions
   4. the output contract
 
-Check before writing a dispatch:  `ls -l AGENTS.md` — if it points at CLAUDE.md,
-assume Codex knows everything in it.
-
-### If Codex must change those instructions, it edits CLAUDE.md — never AGENTS.md
-
-`AGENTS.md` is a **symlink** to `CLAUDE.md`. Most write paths (editors, `>`
-redirection, atomic write-then-rename, many tooling `apply_patch`
-implementations) REPLACE a symlink with a regular file instead of writing
-through it. That silently forks the two: Codex keeps reading a now-stale
-`AGENTS.md` while `CLAUDE.md` moves on, and nothing errors.
-
-So any dispatch that might update project instructions must say:
-
-    Edit CLAUDE.md directly. Do NOT write to AGENTS.md — it is a symlink to
-    CLAUDE.md and writing to it will replace the link with a regular file.
-
-**Respect a standing embargo.** If the user has said not to touch CLAUDE.md,
-that holds until they lift it — say so explicitly in the dispatch rather than
-relying on Codex to infer it. An embargo is currently in force unless the user
-has since lifted it.
-
-Verify the link survived any run that touched instructions:
-
-    ls -l AGENTS.md        # must still show  AGENTS.md -> CLAUDE.md
+Before asking Codex to change an instruction file, inspect whether it is a
+symlink and edit the real target rather than replacing the link. Any current
+embargoes or special relationships between local instruction files belong in
+`LOCAL.md`, not here.
 
 ## Restarting the app kills running turns
 
@@ -194,8 +186,7 @@ If you cannot stage it that way, at minimum ASK the agent afterwards whether it
 stayed blind, and treat the answer as evidence — it will often tell you plainly
 that it did not. Better: do not rely on that.
 
-This is the same design the scrub gate itself uses (blind prober, separate
-private evaluator). Copy that shape whenever "independent derivation" matters.
+Use this structural separation whenever "independent derivation" matters.
 
 ## Orchestrating well — Codex cannot see your context
 
@@ -323,10 +314,9 @@ it and die with:
 
     RuntimeError: headless call error: Not logged in · Please run /login
 
-Observed with the scrub gate: `runner: auto` chose headless, Prepare completed,
-the first LLM stage (canary) failed on auth. **Always pin such tools to SESSION
-mode**, i.e. Codex itself performs the model stages — spawning its own
-sub-agents — through the tool's bootstrap/submit interface.
+If a tool offers a runner that invokes `claude`, select a mode in which Codex
+performs the model stages itself, using the tool's supported handoff interface.
+Put exact runner names and private pipeline instructions in `LOCAL.md`.
 
 ### Driving a staged pipeline (the shape that works)
 
