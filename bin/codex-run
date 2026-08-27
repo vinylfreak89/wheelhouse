@@ -8,6 +8,7 @@ Every subcommand runs the same preflight: GUI up, bridge ready, then act.
   codex-run up                       ensure Wheelhouse.app + bridge are running
   codex-run new [cwd]                reuse-or-create THIS CHAT's thread, print id
   codex-run rename [<id>] "<name>"   retitle a thread (safe: resolution is by chat)
+  codex-run lock [status|acquire|release]  advisory lock on this checkout
   codex-run project [--name N]       show/set the project a thread displays under
   codex-run project --repair         pin any threads created before the registry
                                      (the name is always the chat title -- it is
@@ -321,6 +322,94 @@ def project_of(tid):
 DEFAULT_EFFORT = os.environ.get("CODEX_EFFORT", "xhigh")
 
 
+# ------------------------------------------------------------------ tree lock
+# Two agents write this checkout: this CLI and whatever Codex does inside a turn.
+# Without exclusion they interleave -- one `git add` sweeps up the other's
+# half-finished edits (observed: an approvals fix landed inside a commit about
+# turn parameters), and reloading the UI mid-write serves broken JS.
+#
+# ADVISORY, not enforced by the filesystem: it works because both sides check.
+# A lock whose owner process is gone is stale and may be broken; a lock held by
+# a LIVE process must be waited on, never stolen silently.
+LOCKFILE = os.path.join(os.path.dirname(REGISTRY), "tree.lock")
+
+
+def _lock_read():
+    try:
+        with open(LOCKFILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+#: a manual hold with no live process is abandoned after this long
+LOCK_MAX_AGE = int(os.environ.get("LOCK_MAX_AGE", "3600"))
+
+
+def lock_status():
+    """Staleness has TWO forms, because holders differ.
+
+    A `task` turn holds the lock inside a long-lived process, so a dead pid
+    means abandoned. A manual `lock acquire` returns to the shell immediately --
+    its pid is gone by the next command, which is normal, not stale. Those holds
+    record pid null and expire on AGE instead.
+    """
+    d = _lock_read()
+    if not d:
+        return None
+    pid = d.get("pid")
+    if pid is not None and not _alive(pid):
+        d["stale"] = True                       # process-held and the process died
+    elif pid is None:
+        try:
+            age = time.time() - time.mktime(time.strptime(d.get("since", ""),
+                                                          "%Y-%m-%dT%H:%M:%S"))
+            if age > LOCK_MAX_AGE:
+                d["stale"] = True               # manual hold, abandoned
+            d["age_s"] = int(age)
+        except Exception:
+            pass
+    return d
+
+
+def lock_acquire(owner, note="", wait=0, pid=True):
+    waited = 0
+    while True:
+        cur = lock_status()
+        if cur is None or cur.get("stale"):
+            if cur:
+                print(f"breaking stale lock from pid {cur.get('pid')} "
+                      f"({cur.get('owner')})", file=sys.stderr)
+            os.makedirs(os.path.dirname(LOCKFILE), exist_ok=True)
+            tmp = LOCKFILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"owner": owner, "pid": os.getpid() if pid else None,
+                           "note": note,
+                           "since": time.strftime("%Y-%m-%dT%H:%M:%S")}, f)
+            os.replace(tmp, LOCKFILE)
+            return True
+        if waited >= wait:
+            return False
+        time.sleep(2); waited += 2
+
+
+def lock_release(owner=None):
+    d = _lock_read()
+    if d and (owner is None or d.get("owner") == owner or not _alive(d.get("pid", -1))):
+        try: os.remove(LOCKFILE)
+        except FileNotFoundError: pass
+        return True
+    return False
+
+
 def find_thread(name, cwd=None):
     """The thread belonging to this chat, in this project.
 
@@ -448,9 +537,20 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     # permitted" -- reads succeed, so the failure surfaces late and confusingly.
     if cwd:
         p["cwd"] = os.path.abspath(os.path.expanduser(cwd))
-    before = len(transcript(tid))
-    rpc("turn/start", p, 1800)
-    wait_idle(tid, limit=3600)
+    # A Codex turn WRITES. Hold the tree lock for its duration so nothing else
+    # edits this checkout underneath it (and vice versa).
+    held = lock_acquire(f"codex:{tid[:8]}", note="turn in progress",
+                        wait=int(os.environ.get("LOCK_WAIT", "0")))
+    if not held:
+        cur = lock_status() or {}
+        print(f"WARNING: tree lock held by {cur.get('owner')} (pid {cur.get('pid')})"
+              " -- dispatching anyway, edits may interleave", file=sys.stderr)
+    try:
+        before = len(transcript(tid))
+        rpc("turn/start", p, 1800)
+        wait_idle(tid, limit=3600)
+    finally:
+        if held: lock_release(f"codex:{tid[:8]}")
     for ty, txt in transcript(tid)[before:]:
         if "agentMessage" in ty:
             print(txt)
@@ -548,6 +648,28 @@ def main():
         if got != nm:
             sys.exit(f"rename did not stick: still {got!r}")
         print(f"renamed -> {got}")
+    elif c == "lock":
+        sub = a[1] if len(a) > 1 else "status"
+        if sub == "status":
+            d = lock_status()
+            print("unlocked" if not d else
+                  f"held by {d.get('owner')} "
+                  + (f"pid {d.get('pid')} " if d.get("pid") else "")
+                  + f"since {d.get('since')}"
+                  + (f" ({d['age_s']}s)" if d.get("age_s") is not None else "")
+                  + ("  [STALE - owner gone]" if d.get("stale") else "")
+                  + (("  " + d["note"]) if d.get("note") else ""))
+        elif sub == "acquire":
+            who = a[2] if len(a) > 2 else "manual"
+            # manual holds outlive this process, so record no pid
+            ok = lock_acquire(who, note=" ".join(a[3:]), pid=False,
+                              wait=int(os.environ.get("LOCK_WAIT", "0")))
+            print("acquired" if ok else "BUSY")
+            if not ok: sys.exit(1)
+        elif sub == "release":
+            print("released" if lock_release() else "not held")
+        else:
+            sys.exit("lock status|acquire [owner] [note]|release")
     elif c == "project":
         if "--name" in a:
             nm = a[a.index("--name") + 1]

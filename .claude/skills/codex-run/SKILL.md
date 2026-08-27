@@ -258,6 +258,42 @@ Failures observed building this loop, each of which the protocol below prevents:
    you will forget. Codex went idle for a full exchange once while the driver
    kept saying "still running", because nothing was watching it.
 
+### Take the tree lock before writing a shared checkout
+
+Both sides write the same working tree: you edit files directly, and a Codex
+turn edits them from inside. Nothing stops the two interleaving, and the damage
+is quiet rather than loud:
+
+* `git add` sweeps up whatever the other side left modified. An approvals fix
+  once landed inside a commit titled "ui: test and refresh turn parameters",
+  authored by neither party as a unit.
+* Reloading the UI mid-write serves half-written JS, because the bridge reads
+  `index.html` from disk with `Cache-Control: no-store`.
+* Two `git commit` calls racing produce a history nobody can attribute.
+
+    codex-run lock status                    # who holds it, and since when
+    codex-run lock acquire claude "why"      # take it before you edit
+    codex-run lock release
+
+`codex-run task` takes the lock for the DURATION of the turn automatically and
+releases it in a `finally`, so a crashed dispatch cannot wedge it. If the lock
+is already held it warns and proceeds rather than blocking — set `LOCK_WAIT=300`
+to wait instead.
+
+**It is advisory.** Nothing in the filesystem enforces it; it works only because
+both sides check. Treat a held lock as a hard stop and wait, rather than
+reasoning that your edit is small enough not to matter.
+
+**Staleness has two forms, and conflating them breaks it.** A turn holds the
+lock inside a long-lived process, so a dead pid means abandoned. A manual
+`acquire` returns to the shell immediately, so its pid is gone by the next
+command — that is normal, not stale. Manual holds record no pid and expire on
+age (`LOCK_MAX_AGE`, default 3600s).
+
+**Commit narrowly.** `git add <explicit paths>`, never `-A`, whenever the other
+side might have the tree open. If both parties are going to work concurrently
+and often, the real fix is separate worktrees, not a tighter lock.
+
 ### Never leave work unhooked
 
 Both halves of the loop run in the background, and both need a hook:
