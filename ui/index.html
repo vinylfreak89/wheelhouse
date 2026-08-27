@@ -54,6 +54,12 @@ button{font:inherit}
 .st.errdot{background:var(--err)}
 @keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
 #empty{color:var(--dim2);font-size:12px;padding:16px 10px;line-height:1.6}
+#approvals{flex:0 0 auto;padding:0 14px}
+#approvals:empty{display:none}
+#approvals .appr{border:1px solid var(--warn);border-radius:8px;margin:8px 0}
+#hint{flex:0 0 auto;min-height:0;padding:0 12px 7px;color:var(--dim2);
+      font-size:10.5px;line-height:1.4}
+#hint:empty{display:none}
 #usage{flex:0 0 auto;border-top:1px solid var(--line);padding:9px 12px 11px;font-size:11px;color:var(--dim2)}
 #usage .u{margin-bottom:6px}
 #usage .u:last-child{margin-bottom:0}
@@ -205,6 +211,7 @@ select.mini:focus{outline:none;border-color:var(--accent)}
     <div class="tab" data-t="agents">Agents<span class="n" id="nA"></span></div>
   </div>
   <div id="list"></div>
+  <div id="hint" role="status" aria-live="polite"></div>
   <div id="usage"></div>
 </div>
 
@@ -219,7 +226,8 @@ select.mini:focus{outline:none;border-color:var(--accent)}
     <span class="sp"></span>
     <button class="iconbtn" id="wireBtn">protocol</button>
   </div>
-  <div id="log"></div>
+  <div id="approvals"></div>
+<div id="log"></div>
   <div id="foot">
     <div id="row">
       <textarea id="inp" placeholder="Message Codex…   Enter to send · Shift+Enter for a newline" disabled></textarea>
@@ -281,6 +289,34 @@ select.mini:focus{outline:none;border-color:var(--accent)}
 </div></div>
 
 <script>
+/* WHEELHOUSE_UI_CONTRACTS_START
+   Pure request builders live in the page so the UI and its tests exercise the
+   same code. Keep this block free of DOM access: tests evaluate it in Node. */
+const UIContracts=Object.freeze({
+  threadStart({cwd,defaultCwd,sandbox,approvalPolicy,model,effort}){
+    const p={cwd:String(cwd||"").trim()||defaultCwd,
+             sandbox,approvalPolicy,threadSource:"user"};
+    if(model) p.model=model;
+    if(effort) p.config={model_reasoning_effort:effort};
+    return p;
+  },
+  turnStart({threadId,text,model,effort,approvalPolicy,serviceTier}){
+    const p={threadId,input:[{type:"text",text}]};
+    if(model) p.model=model;
+    if(effort) p.effort=effort;
+    if(approvalPolicy) p.approvalPolicy=approvalPolicy;
+    if(serviceTier) p.serviceTier=serviceTier;
+    return p;
+  },
+  metaRefreshDelays:Object.freeze([50,250,1000]),
+  refreshMeta({threadId,isCurrent,load,schedule}){
+    for(const delay of this.metaRefreshDelays){
+      schedule(()=>{ if(isCurrent()) load(threadId); },delay);
+    }
+  }
+});
+/* WHEELHOUSE_UI_CONTRACTS_END */
+
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const logEl=$("#log"), listEl=$("#list"), wlogEl=$("#wlog");
 let cur=null, curInfo={}, busy=false, streamEl=null, reasonEl=null;
@@ -426,6 +462,9 @@ function setBusy(b){
   $("#send").disabled=!cur;
   $("#stop").style.display=b?"inline-block":"none";
   $("#inp").disabled=!cur;
+  // turn/steer accepts text only. Leaving these enabled while busy implies a
+  // model/effort/approval change will affect the steer, but it cannot.
+  $$("#ctl select").forEach(el=>el.disabled=b);
 }
 function textOf(it){
   if(typeof it.text==="string") return it.text;
@@ -490,8 +529,15 @@ function renderItem(it,ts){
 }
 
 /* ---------- protocol pane ---------- */
+/* Routine polling drowns the pane: thread/list alone fires every second and
+   logs a large response each time, cycling the 400-entry buffer every few
+   minutes. Mute housekeeping here only -- the calls still happen, they just
+   stop hiding the traffic worth reading. Errors are never muted. */
+const WIRE_MUTE=new Set(["thread/list","account/rateLimits/read","thread/read"]);
+let wireShowAll=false;
 function wire(dir,rpcName,id,payload,isErr){
   if(wirePaused) return;
+  if(!wireShowAll && !isErr && WIRE_MUTE.has(rpcName)) return;
   const d=document.createElement("div");
   d.className="w "+(isErr?"werr":dir==="out"?"out":dir==="in"?"in":"note");
   const h=document.createElement("div"); h.className="h";
@@ -841,6 +887,13 @@ async function loadMeta(id){
   }catch(e){ curMeta={}; }
 }
 let curMeta={};
+function refreshMetaAfterTurnStart(id){
+  // The state DB trails turn/start by a few milliseconds. One immediate read
+  // can preserve stale chips for the entire turn, so retry on a short bounded
+  // schedule. Never refresh controls for a thread the user has since left.
+  UIContracts.refreshMeta({threadId:id,isCurrent:()=>cur===id,
+                           load:loadMeta,schedule:setTimeout});
+}
 
 /* ---------- sub-agent side pane ----------
    Codex sub-agents are separate threads. Resuming one subscribes this
@@ -1035,11 +1088,9 @@ function bindModal(){
   if(k) k.onclick=createThread;
 }
 async function createThread(){
-  const p={cwd:$("#mCwd").value.trim()||DEFAULT_CWD,
-           sandbox:$("#mSbx").value, approvalPolicy:$("#mAppr").value,
-           threadSource:"user"};
-  if($("#mModel").value) p.model=$("#mModel").value;
-  if($("#mEffort").value) p.config={model_reasoning_effort:$("#mEffort").value};
+  const p=UIContracts.threadStart({cwd:$("#mCwd").value,defaultCwd:DEFAULT_CWD,
+    sandbox:$("#mSbx").value,approvalPolicy:$("#mAppr").value,
+    model:$("#mModel").value,effort:$("#mEffort").value});
   const btn=$("#mCreate"); btn.disabled=true; btn.textContent="Creating…";
   const r=await rpc("thread/start",p,90);
   btn.disabled=false; btn.textContent="Create";
@@ -1079,15 +1130,15 @@ async function send(){
   $("#inp").value="";
   add("user","you",t);
   setBusy(true);
-  const p={threadId:cur,input:[{type:"text",text:t}]};
-  if($("#selModel").value) p.model=$("#selModel").value;
-  if($("#selEffort").value) p.effort=$("#selEffort").value;
-  if($("#selAppr").value) p.approvalPolicy=$("#selAppr").value;
-  if($("#selTier")&&$("#selTier").value) p.serviceTier=$("#selTier").value;
+  const p=UIContracts.turnStart({threadId:cur,text:t,
+    model:$("#selModel").value,effort:$("#selEffort").value,
+    approvalPolicy:$("#selAppr").value,
+    serviceTier:$("#selTier")&&$("#selTier").value});
   const r=await rpc("turn/start",p,900);
   if(r.error){ add("err","turn/start",JSON.stringify(r.error).slice(0,400)); setBusy(false); return; }
   const tn=(r.result||{}).turn||{};
   if(tn.id) curTurn=tn.id;
+  refreshMetaAfterTurnStart(cur);
 }
 $("#send").onclick=send;
 $("#stop").onclick=async()=>{
@@ -1188,7 +1239,11 @@ function approval(id,method,params){
     b.onclick=()=>settle("dismissed",{});
     d.append(b);
   }
-  logEl.append(d); logEl.scrollTop=logEl.scrollHeight;
+  // NOT logEl: switching threads does logEl.innerHTML="" which destroyed the
+  // element while the app-server was still waiting for an answer -- an approval
+  // that can never be given, and a turn stuck forever. Render outside the log.
+  ($("#approvals")||logEl).append(d);
+  d.scrollIntoView({block:"nearest"});
 }
 
 /* ---------- reconcile ----------
@@ -1249,6 +1304,7 @@ es.onmessage=ev=>{
   if(meth==="turn/started"){
     setBusy(true); streamEl=null; reasonEl=null;
     curTurn=(p.turn&&p.turn.id)||p.turnId||curTurn;
+    if(cur) refreshMetaAfterTurnStart(cur);
   }
   else if(meth==="turn/completed"||meth==="turn/failed"){
     setBusy(false); // any command still labelled inProgress will never be completed now
