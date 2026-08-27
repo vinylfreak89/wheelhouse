@@ -363,6 +363,15 @@ const UIContracts=Object.freeze({
     for(const delay of this.metaRefreshDelays){
       schedule(()=>{ if(isCurrent()) load(threadId); },delay);
     }
+  },
+  applyBusyState({busy,hasThread,send,stop,input,turnControls}){
+    send.textContent=busy?"Steer":"Send";
+    send.disabled=!hasThread;
+    stop.style.display=busy?"inline-block":"none";
+    input.disabled=!hasThread;
+    // These controls configure the next turn. A steer cannot consume them,
+    // but an approval-paused turn must not make them impossible to choose.
+    for(const control of turnControls) control.disabled=false;
   }
 });
 /* WHEELHOUSE_UI_CONTRACTS_END */
@@ -521,13 +530,8 @@ let replaying=false;
 function atBottom(){ return logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight < 60; }
 function setBusy(b){
   busy=b;
-  $("#send").textContent=b?"Steer":"Send";
-  $("#send").disabled=!cur;
-  $("#stop").style.display=b?"inline-block":"none";
-  $("#inp").disabled=!cur;
-  // turn/steer accepts text only. Leaving these enabled while busy implies a
-  // model/effort/approval change will affect the steer, but it cannot.
-  $$("#ctl select").forEach(el=>el.disabled=b);
+  UIContracts.applyBusyState({busy:b,hasThread:Boolean(cur),send:$("#send"),
+    stop:$("#stop"),input:$("#inp"),turnControls:$$("#ctl select")});
 }
 function textOf(it){
   if(typeof it.text==="string") return it.text;
@@ -840,8 +844,10 @@ function tierOptions(modelId){
   const m=modelById(modelId)||modelById(defaultModel)||models[0];
   const tiers=(m&&m.serviceTiers)||[];
   const el=$("#selTier"); if(!el) return;
+  const keep=el.value;
   el.innerHTML=`<option value="">tier: default</option>`
     +tiers.map(t=>`<option value="${t.id}" title="${(t.description||"").replace(/"/g,"")}">${t.name||t.id}</option>`).join("");
+  if([...el.options].some(o=>o.value===keep)) el.value=keep;
   el.style.display=tiers.length?"":"none";
 }
 let defaultModel="";
@@ -942,15 +948,9 @@ async function loadMeta(id){
       effortOptions(m.model,"#selEffort",true);
       effortOptions(m.model,"#mEffort",false);
       tierOptions(m.model);
-      // reflect the THREAD's actual effort, not just the model default
-      const se=$("#selEffort");
-      if(m.reasoning_effort &&
-         [...se.options].some(o=>o.value===m.reasoning_effort)){
-        se.value=m.reasoning_effort;
-      }
-      if(m.model && [...$("#selModel").options].some(o=>o.value===m.model)){
-        $("#selModel").value=m.model;
-      }
+      // The first options describe resolved thread defaults. Do not turn those
+      // defaults into explicit overrides or erase a choice made for the next
+      // turn while this turn is paused on an approval.
     }
     const sbx=fmtSandbox(m.sandbox_policy);
     setDefault("#mSbx", $("#mSbx").options[0].value, null);

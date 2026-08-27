@@ -138,3 +138,28 @@ test("effective metadata refresh is bounded and ignores a departed thread", () =
   scheduled[2].fn();
   assert.deepEqual(loaded, ["thread-1"]);
 });
+
+test("an approval-paused turn leaves next-turn controls selectable", () => {
+  const send = {textContent: "", disabled: false};
+  const stop = {style: {display: "none"}};
+  const input = {disabled: false};
+  const model = {disabled: false, value: ""};
+  const approval = {disabled: false, value: ""};
+
+  contracts.applyBusyState({
+    busy: true, hasThread: true, send, stop, input,
+    turnControls: [model, approval],
+  });
+  assert.equal(send.textContent, "Steer");
+  assert.equal(model.disabled, false);
+  assert.equal(approval.disabled, false);
+
+  model.value = "gpt-test";
+  approval.value = "on-request";
+  contracts.applyBusyState({
+    busy: false, hasThread: true, send, stop, input,
+    turnControls: [model, approval],
+  });
+  assert.equal(model.value, "gpt-test");
+  assert.equal(approval.value, "on-request");
+});

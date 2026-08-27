@@ -132,6 +132,12 @@ class UiStaticTests(unittest.TestCase):
     def test_rate_limit_read_uses_protocol_null_params(self):
         self.assertIn('rpc("account/rateLimits/read",null,30)', self.html)
 
+    def test_metadata_refresh_does_not_overwrite_next_turn_choices(self):
+        body = self.html.split("async function loadMeta", 1)[1].split(
+            "let curMeta", 1)[0]
+        self.assertNotIn('$("#selModel").value=m.model', body)
+        self.assertNotIn("se.value=m.reasoning_effort", body)
+
     def test_state_changing_notifications_refresh_the_ui(self):
         for method in (
             "thread/settings/updated",
