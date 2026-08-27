@@ -1299,6 +1299,13 @@ function retireApproval(id,label){
   if(stick) logEl.scrollTop=logEl.scrollHeight;
   delete apprEls[id];
 }
+function expireApprovals(threadId,turnId){
+  for(const [id,record] of Object.entries(apprEls)){
+    const sameThread=!record.threadId||!threadId||record.threadId===threadId;
+    const sameTurn=!record.turnId||!turnId||record.turnId===turnId;
+    if(sameThread&&sameTurn) retireApproval(id,"expired");
+  }
+}
 function promptError(d,error){
   let e=d.querySelector(".prompt-error");
   if(!e){ e=document.createElement("div"); e.className="prompt-error"; d.append(e); }
@@ -1558,6 +1565,15 @@ es.onmessage=async ev=>{
   if(m.id!==undefined&&!("result"in m)&&!("error"in m)){
     await handleServerRequest(m); return;
   }
+  // Resolution and turn lifecycle apply to the global approval tray, not only
+  // to the thread currently rendered in the transcript pane. Handle them
+  // before the agent/current-thread filters can discard the notification.
+  if(meth==="serverRequest/resolved"){
+    retireApproval(p.requestId,"resolved"); return;
+  }
+  if(meth==="turn/completed"||meth==="turn/failed"){
+    expireApprovals(p.threadId,(p.turn&&p.turn.id)||p.turnId);
+  }
   // events belonging to the sub-agent shown in the side pane
   if(p.threadId&&agentCur&&p.threadId===agentCur){
     if(meth==="item/agentMessage/delta"){
@@ -1589,12 +1605,6 @@ es.onmessage=async ev=>{
           meth==="turn/failed"?"failed":"ended");
       }
     }
-    const finishedTurn=(p.turn&&p.turn.id)||p.turnId;
-    for(const [k,record] of Object.entries(apprEls)){
-      const sameThread=!record.threadId||!p.threadId||record.threadId===p.threadId;
-      const sameTurn=!record.turnId||!finishedTurn||record.turnId===finishedTurn;
-      if(sameThread&&sameTurn) retireApproval(k,"expired");
-    }
     streamEl=null; reasonEl=null; curTurn=null; loadThreads();
     if(cur){ loadMeta(cur); loadAgents(); setTimeout(()=>reconcile(),1200); }
     if(meth==="turn/failed") add("err","turn failed",JSON.stringify(p).slice(0,500));
@@ -1624,10 +1634,6 @@ es.onmessage=async ev=>{
     if(/agentMessage|agent_message/i.test(ty)){ renderMd(streamEl); streamEl=null; }
     else if(/reasoning/i.test(ty)){ renderMd(reasonEl); reasonEl=null; }
     else renderItem(it);
-  }
-  else if(meth==="serverRequest/resolved"){
-    // resolved here, by another client, or cleared by turn lifecycle
-    retireApproval(p.requestId,"resolved");
   }
   else if(/^thread\/(started|created|archived|unarchived|deleted|closed|status\/changed|name|queue\/changed)/.test(meth||"")){
     if(meth==="thread/closed") setBusy(false);

@@ -156,11 +156,21 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("delete apprEls[id]", body)
 
     def test_completion_expires_only_prompts_from_the_finished_turn(self):
-        body = self.html.split(
-            'else if(meth==="turn/completed"', 1)[1].split(
-            'else if(meth==="item/agentMessage/delta"', 1)[0]
-        self.assertIn("record.threadId===p.threadId", body)
-        self.assertIn("record.turnId===finishedTurn", body)
+        body = self.html.split("function expireApprovals", 1)[1].split(
+            "function promptError", 1)[0]
+        self.assertIn("record.threadId===threadId", body)
+        self.assertIn("record.turnId===turnId", body)
+
+    def test_approval_lifecycle_precedes_thread_event_filters(self):
+        events = self.html.split("es.onmessage=async ev=>", 1)[1]
+        resolved = events.index('if(meth==="serverRequest/resolved")')
+        expiry = events.index("expireApprovals(p.threadId")
+        agent_filter = events.index("if(p.threadId&&agentCur")
+        current_filter = events.index("if(p.threadId&&cur&&p.threadId!==cur)")
+        self.assertLess(resolved, agent_filter)
+        self.assertLess(expiry, agent_filter)
+        self.assertLess(resolved, current_filter)
+        self.assertLess(expiry, current_filter)
 
     def test_reconciliation_replaces_offscreen_without_reopening_thread(self):
         render = self.html.split("function renderTranscript", 1)[1].split(
