@@ -221,6 +221,59 @@ id was given. Codex behaved reasonably; the instruction was incomplete.
 When a run comes back empty or wrong, re-read the dispatch before blaming the
 model.
 
+## The spec-and-results loop (when Codex designs, you execute)
+
+The strongest use of a second agent is not "do this task" but **it designs, you
+run, it interprets** — because the two of you have different access. Codex can
+read material you must not; you have a warm harness and can run long jobs in the
+background. Handing work across that boundary needs a protocol, or you spend the
+turn steering.
+
+Failures observed building this loop, each of which the protocol below prevents:
+
+- **Roles stated too late.** A brief that says "design AND run the experiment"
+  gets Codex grinding through jobs that take minutes each, when it should have
+  handed back a spec. State the division of labour in the FIRST message, not in
+  a `steer`.
+- **No machine-readable handoff.** Prose describing which spans to test has to
+  be parsed by hand and transcribed, which is where errors enter. Demand a
+  JSON artifact.
+- **Runtimes unknown to Codex.** It cannot see how slow your tooling is. Tell it
+  ("one classification at 5k tokens is ~3 min") or it will plan work it cannot
+  finish inside a turn.
+- **Blindness restated ad hoc.** If the reader must not learn the corpus, say so
+  as a standing output contract in every brief, not as an afterthought.
+
+### The protocol
+
+1. **You brief** with roles explicit: who reads what, who executes, who
+   interprets. Include the tooling entry points, the runtime per unit of work,
+   and the output contract.
+2. **Codex returns two artifacts**: a machine-readable spec (`spec.json` — ids,
+   file paths, line ranges, arms, parameters) and a prose report containing its
+   reasoning and, critically, its **prespecified analysis**: the contrast it
+   will compute and the evidence thresholds it will judge by, fixed BEFORE any
+   data exists.
+3. **You execute** the spec verbatim and return a results table **keyed by the
+   spec's ids**. Do not reinterpret the design while running it; if the spec is
+   unrunnable, say so and ask, because silently substituting your own version
+   destroys the prespecification.
+4. **Codex interprets** against its own fixed thresholds.
+
+### Why prespecification is the point
+
+You will otherwise select the thing that scored highest, sweep it, and discover
+an effect that is partly regression to the mean. Codex will catch this if you
+let it — in one exchange it excluded a span from its own candidate set on the
+grounds that the span had been chosen as a maximum in earlier work, and
+hash-stamped its spec file so the prespecification was verifiable after the
+fact. Ask for that discipline explicitly; it makes a falsifiable result possible
+rather than a persuasive one.
+
+**Report failures faithfully.** When the run falsifies the hypothesis you handed
+over, hand back the numbers that falsify it, plainly labelled. A loop that only
+returns confirming evidence is worse than no loop.
+
 ## Speaking Codex's language
 
 Codex is not Claude Code. Two differences bite immediately:
