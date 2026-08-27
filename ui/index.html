@@ -68,6 +68,11 @@ button{font:inherit}
 #usage .track{height:3px;background:var(--panel3);border-radius:2px;overflow:hidden}
 #usage .fill{height:100%;background:var(--accent);border-radius:2px;transition:width .4s}
 #usage .fill.warn{background:var(--warn)} #usage .fill.hot{background:var(--err)}
+#usage .bucket+.bucket{border-top:1px solid var(--line);margin-top:8px;padding-top:8px}
+#usage .bucket-title{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;
+  color:var(--fg);font-weight:600}
+#usage .bucket-title span{color:var(--dim2);font-weight:400;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
 #usage .plan{display:flex;justify-content:space-between;color:var(--dim2);margin-top:7px}
 #usage .cred{display:flex;justify-content:space-between;margin-top:7px;
   padding-top:7px;border-top:1px solid var(--line)}
@@ -231,6 +236,7 @@ select.mini:focus{outline:none;border-color:var(--accent)}
     <span class="chip" id="cEff" style="display:none"></span>
     <span class="chip" id="cAppr" style="display:none"></span>
     <span class="chip" id="cSbx" style="display:none"></span>
+    <button class="chip" id="cCwd" style="display:none" title="Change working directory"></button>
     <span class="chip" id="cTok" style="display:none"></span>
     <span class="sp"></span>
     <button class="iconbtn" id="wireBtn">protocol</button>
@@ -350,6 +356,9 @@ const UIContracts=Object.freeze({
     if(effort) p.config={model_reasoning_effort:effort};
     return p;
   },
+  threadSettings({threadId,cwd}){
+    return {threadId,cwd:String(cwd||"").trim()};
+  },
   turnStart({threadId,text,model,effort,approvalPolicy,serviceTier}){
     const p={threadId,input:[{type:"text",text}]};
     if(model) p.model=model;
@@ -372,6 +381,20 @@ const UIContracts=Object.freeze({
     // These controls configure the next turn. A steer cannot consume them,
     // but an approval-paused turn must not make them impossible to choose.
     for(const control of turnControls) control.disabled=false;
+  },
+  rateLimitBuckets(result){
+    const byId=result&&result.rateLimitsByLimitId;
+    if(byId&&typeof byId==="object"){
+      const entries=Object.entries(byId);
+      if(entries.length) return entries.map(([id,snapshot])=>({
+        id,name:(snapshot&&snapshot.limitName)||(id==="codex"?"Codex":id),
+        snapshot:snapshot||{}
+      }));
+    }
+    const snapshot=(result&&result.rateLimits)||{};
+    if(!snapshot.primary&&!snapshot.secondary&&!snapshot.credits) return [];
+    const id=snapshot.limitId||"codex";
+    return [{id,name:snapshot.limitName||(id==="codex"?"Codex":id),snapshot}];
   }
 });
 /* WHEELHOUSE_UI_CONTRACTS_END */
@@ -627,6 +650,29 @@ async function cwdOf(id){
   if(th.name) nameCache[id]=th.name;
   return cwdCache[id];
 }
+function showCwd(path){
+  const chip=$("#cCwd");
+  if(!path){ chip.style.display="none"; chip.textContent=""; return; }
+  chip.style.display="inline-block";
+  chip.textContent="cwd: "+base(path);
+  chip.title=path+" — click to change for subsequent turns";
+}
+async function changeThreadCwd(t){
+  if(!t||!t.id) return;
+  const current=await cwdOf(t.id);
+  const selected=await askText("Working directory for subsequent turns",current);
+  if(selected==null||selected===current) return;
+  if(!selected.startsWith("/")){
+    $("#hint").textContent="working directory must be an absolute path"; return;
+  }
+  const payload=UIContracts.threadSettings({threadId:t.id,cwd:selected});
+  const r=await rpc("thread/settings/update",payload,30);
+  if(r.error){ $("#hint").textContent="working directory update failed: "+
+    String(r.error.message||r.error).slice(0,180); return; }
+  cwdCache[t.id]=payload.cwd; t.cwd=payload.cwd;
+  if(cur===t.id){ curInfo.cwd=payload.cwd; showCwd(payload.cwd); }
+  $("#hint").textContent="working directory updated for subsequent turns";
+}
 const nameCache={};
 /* A thread's PROJECT is pinned by bin/codex-run and served from /projects.
    It is deliberately not threads.cwd: a turn's --cwd overwrites that column,
@@ -876,28 +922,44 @@ function bar(name,w){
     <span>${pct}% · resets ${until(w.resetsAt)}</span></div>
     <div class="track"><div class="fill ${cls}" style="width:${pct}%"></div></div></div>`;
 }
-async function loadUsage(){
-  const r=await rpc("account/rateLimits/read",null,30);
-  if(r.error||!r.result) return; // a transient poll failure must not blank the last good meter
-  const rl=((r.result||{}).rateLimits)||{};
-  if(!rl.primary&&!rl.secondary){ $("#usage").innerHTML=""; return; }
-  const p=rl.primary, sec=rl.secondary;
-  let html="";
-  if(p)   html+=bar(human(p.windowDurationMins||300), p);
-  if(sec) html+=bar(human(sec.windowDurationMins||10080), sec);
-  // Credits ride along in the same payload as the rate limits -- no extra call.
-  // Shown as their own row because when a window is exhausted this is the number
-  // that decides whether work continues.
+function safeText(value){
+  return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
+    ">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+}
+function bucketHtml(bucket){
+  const rl=bucket.snapshot||{}, p=rl.primary, sec=rl.secondary;
+  let html=`<div class="bucket"><div class="bucket-title"><b>${safeText(bucket.name)}</b>`+
+    `<span>${safeText(rl.planType||"")}</span></div>`;
+  if(p) html+=bar(human(p.windowDurationMins||300),p);
+  if(sec) html+=bar(human(sec.windowDurationMins||10080),sec);
+  if(rl.spendControlReached) html+=`<div class="note">spend limit reached</div>`;
   const cr=rl.credits||{};
-  html+=`<div class="plan"><span>${rl.planType||""}</span><span>${
-    rl.spendControlReached?"spend limit reached":""}</span></div>`;
   if(cr.unlimited){
     html+=`<div class="cred"><b>credits</b><span>unlimited</span></div>`;
   } else if(cr.hasCredits){
-    const covering = p && p.usedPercent>=100;
-    html+=`<div class="cred${covering?" covering":""}"><b>credits</b><span>${cr.balance}</span></div>`;
-    if(covering) html+=`<div class="note">5h window exhausted \u2014 credits in use</div>`;
+    const covering=p&&p.usedPercent>=100;
+    html+=`<div class="cred${covering?" covering":""}"><b>credits</b>`+
+      `<span>${safeText(cr.balance)}</span></div>`;
+    if(covering) html+=`<div class="note">${human(p.windowDurationMins||300)} window exhausted \u2014 credits in use</div>`;
   }
+  return html+`</div>`;
+}
+async function loadUsage(){
+  const r=await rpc("account/rateLimits/read",null,30);
+  if(r.error||!r.result){
+    // Preserve the last good snapshot, but make a broken account/session
+    // visible instead of silently leaving an empty or stale panel.
+    let note=$("#usage .usage-error");
+    if(!note){ note=document.createElement("div"); note.className="note usage-error";
+      $("#usage").append(note); }
+    const message=String((r.error&&r.error.message)||"usage request failed");
+    note.textContent=/token_expired|token_revoked|401 Unauthorized/i.test(message)
+      ?"usage unavailable · authentication expired":"usage temporarily unavailable";
+    note.title=message.slice(0,500); return;
+  }
+  const buckets=UIContracts.rateLimitBuckets(r.result);
+  if(!buckets.length){ $("#usage").innerHTML=""; return; }
+  let html=buckets.map(bucketHtml).join("");
   const rc=((r.result||{}).rateLimitResetCredits)||{};
   if(rc.availableCount>0)
     html+=`<div class="note">${rc.availableCount} limit-reset credit(s) available</div>`;
@@ -1044,6 +1106,7 @@ function threadMenu(t,x,y){
     if(cur===t.id) $("#title").textContent=nm;
     loadThreads();
   });
+  mk("Working directory…",()=>changeThreadCwd(t));
   mk("Archive",async()=>{
     const kidsR=await rpc("thread/list",{ancestorThreadId:t.id,limit:50},40);
     const kids=(kidsR.result||{}).data||kidsR.data||[];
@@ -1157,6 +1220,7 @@ async function open_(id){
   $("#title").textContent=th.name||nameCache[id]||(th.preview||"").slice(0,64)||id.slice(0,8);
   if(th.name) nameCache[id]=th.name;
   if(th.cwd){ cwdCache[id]=th.cwd; }
+  showCwd(th.cwd||cwdCache[id]||"");
   loadMeta(id);
   renderTranscript(rows);
 
@@ -1264,6 +1328,8 @@ $$("#tabs .tab").forEach(el=>el.onclick=()=>{
 $("#selModel").onchange=()=>{ effortOptions($("#selModel").value,"#selEffort",true);
                               tierOptions($("#selModel").value); };
 $("#mModel").onchange=()=>effortOptions($("#mModel").value,"#mEffort",false);
+$("#cCwd").onclick=()=>changeThreadCwd(curInfo&&curInfo.id?curInfo:
+  threads.find(t=>t.id===cur));
 $("#wireBtn").onclick=()=>{ $("#wire").classList.toggle("on");
   $("#wireBtn").classList.toggle("on",$("#wire").classList.contains("on")); };
 $("#wclear").onclick=()=>wlogEl.innerHTML="";
@@ -1644,6 +1710,11 @@ es.onmessage=async ev=>{
     if(cur) setTimeout(()=>reconcile(),100);
   }
   else if(meth==="thread/settings/updated"||meth==="thread/tokenUsage/updated"){
+    if(meth==="thread/settings/updated"&&p.threadId&&p.threadSettings&&p.threadSettings.cwd){
+      cwdCache[p.threadId]=p.threadSettings.cwd;
+      const thread=threads.find(t=>t.id===p.threadId); if(thread) thread.cwd=p.threadSettings.cwd;
+      if(cur===p.threadId){ curInfo.cwd=p.threadSettings.cwd; showCwd(p.threadSettings.cwd); }
+    }
     if(cur) loadMeta(cur);
   }
   else if(meth==="thread/project/updated"||meth==="project/changed"){

@@ -169,5 +169,45 @@ class ThreadResolutionTests(unittest.TestCase):
             self.assertEqual(saved["threads"]["right"]["chat_id"], "local-right")
 
 
+class TurnSettingInheritanceTests(unittest.TestCase):
+    def test_claude_task_inherits_thread_cwd_unless_explicitly_overridden(self):
+        with tempfile.TemporaryDirectory() as temp:
+            prompt = Path(temp) / "task.txt"
+            prompt.write_text("do the task", encoding="utf-8")
+            calls = []
+
+            def record(method, params=None, timeout=30):
+                calls.append((method, params, timeout))
+                return {}
+
+            common = (
+                mock.patch.object(codex_run, "rpc", side_effect=record),
+                mock.patch.object(codex_run, "transcript", return_value=[]),
+                mock.patch.object(codex_run, "wait_idle"),
+                mock.patch.object(codex_run, "thread_settings", return_value={}),
+                mock.patch.object(codex_run, "lock_acquire", return_value=True),
+                mock.patch.object(codex_run, "lock_release"),
+            )
+            with common[0], common[1], common[2], common[3], common[4], common[5]:
+                codex_run.send_file("thread-1", str(prompt))
+
+            turn = next(params for method, params, _ in calls
+                        if method == "turn/start")
+            self.assertNotIn("cwd", turn)
+
+            calls.clear()
+            with mock.patch.object(codex_run, "rpc", side_effect=record), \
+                 mock.patch.object(codex_run, "transcript", return_value=[]), \
+                 mock.patch.object(codex_run, "wait_idle"), \
+                 mock.patch.object(codex_run, "thread_settings", return_value={}), \
+                 mock.patch.object(codex_run, "lock_acquire", return_value=True), \
+                 mock.patch.object(codex_run, "lock_release"):
+                codex_run.send_file("thread-1", str(prompt), cwd=temp)
+
+            turn = next(params for method, params, _ in calls
+                        if method == "turn/start")
+            self.assertEqual(turn["cwd"], os.path.abspath(temp))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -132,6 +132,20 @@ class UiStaticTests(unittest.TestCase):
     def test_rate_limit_read_uses_protocol_null_params(self):
         self.assertIn('rpc("account/rateLimits/read",null,30)', self.html)
 
+    def test_active_working_directory_is_persisted_and_visible(self):
+        self.assertIn('rpc("thread/settings/update",payload,30)', self.html)
+        self.assertIn('id="cCwd"', self.html)
+        self.assertIn('mk("Working directory…"', self.html)
+        self.assertIn("p.threadSettings.cwd", self.html)
+
+    def test_usage_renders_all_rate_limit_buckets_and_visible_errors(self):
+        body = self.html.split("async function loadUsage", 1)[1].split(
+            "/* ---------- effective settings", 1)[0]
+        self.assertIn("UIContracts.rateLimitBuckets", body)
+        self.assertIn("buckets.map(bucketHtml)", body)
+        self.assertIn("usage-error", body)
+        self.assertIn("authentication expired", body)
+
     def test_metadata_refresh_does_not_overwrite_next_turn_choices(self):
         body = self.html.split("async function loadMeta", 1)[1].split(
             "let curMeta", 1)[0]
@@ -198,7 +212,8 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("if(!Array.isArray(nextThreads)) return", threads)
         usage = self.html.split("async function loadUsage", 1)[1].split(
             "/* ---------- effective settings", 1)[0]
-        self.assertIn("if(r.error||!r.result) return", usage)
+        self.assertIn("if(r.error||!r.result){", usage)
+        self.assertIn('$("#usage").append(note)', usage)
 
     def test_mcp_elicitation_links_reject_non_http_schemes(self):
         elicitation = self.html.split('kind==="elicitation"', 1)[1].split(

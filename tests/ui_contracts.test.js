@@ -118,6 +118,12 @@ test("thread/start maps modal controls to the protocol shape", () => {
   });
 });
 
+test("thread settings persist an explicit working directory", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.threadSettings({
+    threadId: "thread-1", cwd: "  /work/other-repo  ",
+  }))), {threadId: "thread-1", cwd: "/work/other-repo"});
+});
+
 test("effective metadata refresh is bounded and ignores a departed thread", () => {
   const scheduled = [];
   const loaded = [];
@@ -162,4 +168,34 @@ test("an approval-paused turn leaves next-turn controls selectable", () => {
   });
   assert.equal(model.value, "gpt-test");
   assert.equal(approval.value, "on-request");
+});
+
+test("multi-bucket usage keeps model-specific limits", () => {
+  const buckets = contracts.rateLimitBuckets({
+    rateLimits: {limitId: "codex", primary: {usedPercent: 1}},
+    rateLimitsByLimitId: {
+      codex: {limitId: "codex", primary: {usedPercent: 1}},
+      codex_bengalfox: {
+        limitId: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark",
+        primary: {usedPercent: 2}, secondary: {usedPercent: 3},
+      },
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(buckets)), [
+    {id: "codex", name: "Codex",
+      snapshot: {limitId: "codex", primary: {usedPercent: 1}}},
+    {id: "codex_bengalfox", name: "GPT-5.3-Codex-Spark", snapshot: {
+      limitId: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark",
+      primary: {usedPercent: 2}, secondary: {usedPercent: 3},
+    }},
+  ]);
+});
+
+test("single-bucket usage remains compatible with older servers", () => {
+  const buckets = contracts.rateLimitBuckets({
+    rateLimits: {limitId: "codex", primary: {usedPercent: 9}},
+  });
+  assert.equal(buckets.length, 1);
+  assert.equal(buckets[0].name, "Codex");
+  assert.equal(buckets[0].snapshot.primary.usedPercent, 9);
 });
