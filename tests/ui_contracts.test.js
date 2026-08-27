@@ -16,6 +16,62 @@ vm.createContext(context);
 vm.runInContext(match[1] + ";globalThis.UIContracts=UIContracts;", context);
 const contracts = context.UIContracts;
 
+test("approval vocabularies are exact and do not swallow permission prompts", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.approvalVocab("execCommandApproval"))), {
+    yes: "approved", always: "approved_for_session", no: "abort",
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.approvalVocab("item/fileChange/requestApproval"))), {
+    yes: "accept", always: "acceptForSession", no: "decline",
+  });
+  assert.equal(
+    contracts.approvalVocab("item/permissions/requestApproval"), null);
+});
+
+test("permission decisions always satisfy the required permissions shape", () => {
+  const requested = {permissions: {network: {enabled: true}}};
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.permissionResponse(requested, true))), {
+    permissions: {network: {enabled: true}},
+    scope: "turn",
+    strictAutoReview: false,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.permissionResponse(requested, false))), {
+    permissions: {},
+    scope: "turn",
+    strictAutoReview: true,
+  });
+});
+
+test("user answers and MCP elicitation actions use protocol response shapes", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.userInputResponse([
+    ["scope", ["UI only"]], ["risk", ["low"]],
+  ]))), {
+    answers: {
+      scope: {answers: ["UI only"]},
+      risk: {answers: ["low"]},
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.elicitationResponse("accept", {email: "a@example.com"}))), {
+    action: "accept", content: {email: "a@example.com"},
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.elicitationResponse("decline"))), {action: "decline"});
+});
+
+test("automatic and unsupported server responses are deterministic", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.currentTimeResponse(1234567))), {currentTimeAt: 1234});
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    contracts.unsupportedRequestError("item/tool/call"))), {
+    code: -32601,
+    message: "Wheelhouse does not implement item/tool/call",
+  });
+});
+
 test("turn/start includes every selected override", () => {
   const payload = contracts.turnStart({
     threadId: "thread-1",

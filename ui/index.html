@@ -135,6 +135,15 @@ button{font:inherit}
     cursor:pointer;background:var(--panel2);color:var(--fg)}
 .appr button.yes{background:var(--accent2);color:#14140f;border-color:var(--accent2);font-weight:600}
 .appr button.no{background:var(--err);color:#fff;border-color:var(--err)}
+.appr .q{margin:9px 0;padding-top:8px;border-top:1px solid var(--line)}
+.appr .q label{display:block;color:var(--fg);font-size:12px;margin-bottom:5px}
+.appr .q small{display:block;color:var(--dim);margin-bottom:5px}
+.appr .q input,.appr .q select,.appr .q textarea{width:100%;background:var(--panel2);
+  color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+.appr .q input[type="checkbox"]{width:auto;margin-right:6px}
+.appr .q textarea{min-height:85px;resize:vertical;font-family:var(--mono);font-size:11.5px}
+.appr .prompt-error{color:var(--err);font-size:11.5px;margin-top:7px}
+.appr a{color:var(--accent);word-break:break-all}
 
 /* ---------- composer ---------- */
 #foot{flex:0 0 auto;border-top:1px solid var(--line);padding:11px 14px;background:var(--panel)}
@@ -293,6 +302,47 @@ select.mini:focus{outline:none;border-color:var(--accent)}
    Pure request builders live in the page so the UI and its tests exercise the
    same code. Keep this block free of DOM access: tests evaluate it in Node. */
 const UIContracts=Object.freeze({
+  serverRequests:Object.freeze({
+    "execCommandApproval":"legacyApproval",
+    "applyPatchApproval":"legacyApproval",
+    "item/commandExecution/requestApproval":"approval",
+    "item/fileChange/requestApproval":"approval",
+    "item/permissions/requestApproval":"permissions",
+    "item/tool/requestUserInput":"userInput",
+    "mcpServer/elicitation/request":"elicitation",
+    "currentTime/read":"currentTime",
+    "account/chatgptAuthTokens/refresh":"unsupported",
+    "attestation/generate":"unsupported",
+    "item/tool/call":"unsupported"
+  }),
+  approvalVocab(method){
+    const kind=this.serverRequests[method];
+    if(kind==="legacyApproval")
+      return {yes:"approved",always:"approved_for_session",no:"abort"};
+    if(kind==="approval")
+      return {yes:"accept",always:"acceptForSession",no:"decline"};
+    return null;
+  },
+  permissionResponse(params,grant,scope="turn"){
+    return {permissions:grant?((params&&params.permissions)||{}):{},
+            scope,strictAutoReview:!grant};
+  },
+  userInputResponse(entries){
+    const answers={};
+    for(const [id,values] of entries) answers[id]={answers:values};
+    return {answers};
+  },
+  elicitationResponse(action,content){
+    const out={action};
+    if(action==="accept"&&content!==undefined) out.content=content;
+    return out;
+  },
+  currentTimeResponse(nowMs=Date.now()){
+    return {currentTimeAt:Math.floor(nowMs/1000)};
+  },
+  unsupportedRequestError(method){
+    return {code:-32601,message:`Wheelhouse does not implement ${method}`};
+  },
   threadStart({cwd,defaultCwd,sandbox,approvalPolicy,model,effort}){
     const p={cwd:String(cwd||"").trim()||defaultCwd,
              sandbox,approvalPolicy,threadSource:"user"};
@@ -319,6 +369,7 @@ const UIContracts=Object.freeze({
 
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const logEl=$("#log"), listEl=$("#list"), wlogEl=$("#wlog");
+let logTarget=logEl;              // detached while rebuilding a transcript
 let cur=null, curInfo={}, busy=false, streamEl=null, reasonEl=null;
 let curTurn=null;                 // active turn id: turn/steer and turn/interrupt both need it
 
@@ -348,8 +399,18 @@ async function rpc(method,params,timeout){
     return await r.json();
   }catch(e){ return {error:{message:String(e)}}; }
 }
-const respond=(id,result)=>fetch("/respond",{method:"POST",
-  headers:{"Content-Type":"application/json"},body:JSON.stringify({id,result})});
+async function respond(id,result,error){
+  const payload={id};
+  if(error!==undefined) payload.error=error; else payload.result=result;
+  const r=await fetch("/respond",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(payload)});
+  let body={}; try{ body=await r.json(); }catch(e){}
+  if(!r.ok||body.error){
+    const detail=(body.error&&body.error.message)||body.error||`response failed (${r.status})`;
+    throw new Error(typeof detail==="string"?detail:JSON.stringify(detail));
+  }
+  return body;
+}
 
 /* ---------- rendering ---------- */
 const itemEls={};                 // item id -> .msg element, for in-place updates
@@ -437,6 +498,7 @@ function add(cls,who,text,ts){
   // (=> now). NULL MEANS UNKNOWN -- render nothing rather than stamping "now",
   // which made every replayed message show the same clock.
   const when = (ts === null) ? null : (ts || Date.now());
+  const stick=logTarget===logEl&&atBottom();
   const d=document.createElement("div");
   d.className="msg "+cls;
   const w=document.createElement("div"); w.className="who";
@@ -448,7 +510,8 @@ function add(cls,who,text,ts){
   const b=document.createElement("div"); b.className="body"; b.textContent=text||"";
   // Agent prose is markdown; command output and user text are not.
   if((cls==="agent"||cls==="rsn") && text){ b.dataset.raw=text; renderMd(b); }
-  d.append(w,b); logEl.append(d); logEl.scrollTop=logEl.scrollHeight;
+  d.append(w,b); logTarget.append(d);
+  if(stick) logEl.scrollTop=logEl.scrollHeight;
   // Cache ONLY what server history does not replay (commands / tool items).
   // Caching messages too meant every re-render added the server's copy AND the
   // cached copy -- messages doubled, then tripled as reconcile ran.
@@ -493,7 +556,6 @@ function renderItem(it,ts){
       const who2="command"+(st!==undefined&&st!==null?" \u00b7 "+st:"");
       itemEls[key].querySelector(".body").textContent=text;
       itemEls[key].querySelector(".who span").textContent=who2;
-      txUpdateLast(key,who2,text);
       return itemEls[key].querySelector(".body");
     }
     const stick=atBottom();
@@ -578,11 +640,16 @@ function projOf(id){
   if(pin&&pin.name) return pin.name;
   return base(cwdCache[id])||"(no project)";
 }
+let threadsGeneration=0;
 async function loadThreads(){
+  const generation=++threadsGeneration;
   const r=await rpc("thread/list",{limit:100});
-  threads=(r.result&&r.result.data)||[];
+  const nextThreads=r.result&&r.result.data;
+  if(!Array.isArray(nextThreads)) return; // preserve the last good sidebar on a polling error
   await loadProjects();
-  await Promise.all(threads.slice(0,60).map(t=>cwdOf(t.id).catch(()=>"")));
+  await Promise.all(nextThreads.slice(0,60).map(t=>cwdOf(t.id).catch(()=>"")));
+  if(generation!==threadsGeneration) return;
+  threads=nextThreads;
   const running=threads.filter(t=>isActive(t)).length;
   $("#nR").textContent=running?` ${running}`:"";
   $("#nD").textContent=threads.length?` ${threads.length-running}`:"";
@@ -614,14 +681,16 @@ let agents=[];        // sub-agent threads spawned by the open thread
    calls. They are excluded from a default thread/list because sourceKinds
    defaults to interactive-only, so ask for them explicitly. */
 async function loadAgents(){
+  const parent=cur;
   // Sub-agent threads are ONLY reachable via ancestorThreadId -- a plain
   // thread/list never returns them, whatever sourceKinds you pass. So with no
   // thread open, aggregate descendants across the threads we know about.
   let rows=[];
-  if(cur){
-    const r=await rpc("thread/list",{ancestorThreadId:cur,limit:50},40);
-    rows=(r.result&&r.result.data)||[];
-    rows.forEach(x=>x.parentThreadId=x.parentThreadId||cur);
+  if(parent){
+    const r=await rpc("thread/list",{ancestorThreadId:parent,limit:50},40);
+    if(!Array.isArray(r.result&&r.result.data)) return;
+    rows=r.result.data;
+    rows.forEach(x=>x.parentThreadId=x.parentThreadId||parent);
   } else {
     const parents=threads.slice(0,25);
     const res=await Promise.all(parents.map(pt=>
@@ -631,6 +700,7 @@ async function loadAgents(){
         .catch(()=>[])));
     rows=res.flat();
   }
+  if(cur!==parent) return;
   agents=rows;
   $("#nA").textContent=agents.length?` ${agents.length}`:"";
   if(tab==="agents") renderList();
@@ -801,7 +871,8 @@ function bar(name,w){
     <div class="track"><div class="fill ${cls}" style="width:${pct}%"></div></div></div>`;
 }
 async function loadUsage(){
-  const r=await rpc("account/rateLimits/read",{},30);
+  const r=await rpc("account/rateLimits/read",null,30);
+  if(r.error||!r.result) return; // a transient poll failure must not blank the last good meter
   const rl=((r.result||{}).rateLimits)||{};
   if(!rl.primary&&!rl.secondary){ $("#usage").innerHTML=""; return; }
   const p=rl.primary, sec=rl.secondary;
@@ -847,7 +918,10 @@ async function loadMeta(id){
     e.style.display="inline-block"; e.textContent=txt; if(title) e.title=title;
   };
   try{
-    const m=await (await fetch("/threadmeta?id="+encodeURIComponent(id))).json();
+    const response=await fetch("/threadmeta?id="+encodeURIComponent(id));
+    if(!response.ok) throw new Error(`metadata read failed (${response.status})`);
+    const m=await response.json();
+    if(cur!==id) return;
     curMeta=m;
     chip("#cModel", m.model?("model: "+m.model):null);
     const mm=modelById(m.model);
@@ -1027,17 +1101,46 @@ function askConfirm(msg){
 }
 
 /* ---------- open ---------- */
-async function open_(id){
-  cur=id; logEl.innerHTML=""; streamEl=null; reasonEl=null; curTurn=null;
-  for(const k of Object.keys(apprEls)) delete apprEls[k];
+/* Build a transcript off-DOM, then swap it into place in one operation. The
+   former open_ cleared #log before two network requests; reconciliation after
+   every completed turn therefore left a conspicuous blank pane while it
+   fetched the same conversation again. */
+function renderTranscript(rows,{atEnd=true,scrollTop=0}={}){
+  const staging=document.createDocumentFragment();
+  logTarget=staging;
   for(const k in itemEls) delete itemEls[k];
+  replaying=true;
+  try{
+    for(const row of rows){
+      const ms=Date.parse(row.ts);
+      if(row.cls==="scaffold"){
+        const b=add("scaffold","injected: "+row.who,
+                    `(${row.text.length.toLocaleString()} chars — click to expand)`,
+                    isNaN(ms)?null:ms);
+        const box=b.parentElement, full=row.text;
+        let shown=false;
+        box.onclick=()=>{ shown=!shown; box.classList.toggle("open",shown);
+                          b.textContent = shown ? full
+                            : `(${full.length.toLocaleString()} chars — click to expand)`; };
+        continue;
+      }
+      add(row.cls, row.who, row.text, isNaN(ms)?null:ms);
+    }
+  } finally {
+    replaying=false;
+    logTarget=logEl;
+  }
+  logEl.replaceChildren(staging);
+  renderedFromRollout=rows.length;
+  logEl.scrollTop=atEnd?logEl.scrollHeight:scrollTop;
+}
+
+let openGeneration=0;
+async function open_(id){
+  const generation=++openGeneration;
+  cur=id; streamEl=null; reasonEl=null; curTurn=null;
   const r=await rpc("thread/resume",{threadId:id});
   const th=(r.result&&r.result.thread)||{};
-  curInfo=th;
-  $("#title").textContent=th.name||nameCache[id]||(th.preview||"").slice(0,64)||id.slice(0,8);
-  if(th.name) nameCache[id]=th.name;
-  if(th.cwd){ cwdCache[id]=th.cwd; }
-  loadMeta(id);
 
   // Render straight from the rollout JSONL. It is the authoritative record --
   // ordered, timestamped, and complete, including tool calls and their output
@@ -1048,27 +1151,17 @@ async function open_(id){
     const t=await (await fetch("/transcript?id="+encodeURIComponent(id))).json();
     rows=t.rows||[];
   }catch(e){}
-  replaying=true;
-  for(const row of rows){
-    const ms=Date.parse(row.ts);
-    if(row.cls==="scaffold"){
-      const b=add("scaffold","injected: "+row.who,
-                  `(${row.text.length.toLocaleString()} chars — click to expand)`,
-                  isNaN(ms)?null:ms);
-      const box=b.parentElement, full=row.text;
-      let shown=false;
-      box.onclick=()=>{ shown=!shown; box.classList.toggle("open",shown);
-                        b.textContent = shown ? full
-                          : `(${full.length.toLocaleString()} chars — click to expand)`; };
-      continue;
-    }
-    add(row.cls, row.who, row.text, isNaN(ms)?null:ms);
-  }
-  replaying=false;
-  renderedFromRollout=rows.length;
+  if(generation!==openGeneration||cur!==id) return;
+
+  curInfo=th;
+  $("#title").textContent=th.name||nameCache[id]||(th.preview||"").slice(0,64)||id.slice(0,8);
+  if(th.name) nameCache[id]=th.name;
+  if(th.cwd){ cwdCache[id]=th.cwd; }
+  loadMeta(id);
+  renderTranscript(rows);
 
   setBusy(((th.status||{}).type)==="active");
-  renderList(); loadAgents(); logEl.scrollTop=logEl.scrollHeight;
+  renderList(); loadAgents();
 }
 let renderedFromRollout=0;
 
@@ -1100,6 +1193,10 @@ async function createThread(){
   }
   const th=r.result.thread||r.result;
   const id=th.id||r.result.threadId;
+  if(!id){
+    $("#merr").style.display="block";
+    $("#merr").textContent="thread/start returned no thread id"; return;
+  }
   const nm=$("#mName").value.trim();
   if(nm){ await rpc("thread/name/set",{threadId:id,name:nm}); nameCache[id]=nm; }
   cwdCache[id]=p.cwd;
@@ -1113,40 +1210,45 @@ bindModal();
 async function send(){
   const t=$("#inp").value.trim();
   if(!t||!cur) return;
+  const threadId=cur;
 
   // A turn is already running -> steer it instead of queueing a new one.
   // This is the whole point of the app: you type into work already in flight.
   if(busy){
     const steerTo=await activeTurnId();
+    if(cur!==threadId) return;
     if(!steerTo){ add("err","steer","no active turn to steer"); return; }
     $("#inp").value="";
     add("user","you (steer)",t);
     const r=await rpc("turn/steer",
-      {threadId:cur,expectedTurnId:steerTo,input:[{type:"text",text:t}]},120);
-    if(r.error) add("err","turn/steer",JSON.stringify(r.error).slice(0,400));
+      {threadId,expectedTurnId:steerTo,input:[{type:"text",text:t}]},120);
+    if(r.error&&cur===threadId) add("err","turn/steer",JSON.stringify(r.error).slice(0,400));
     return;
   }
 
   $("#inp").value="";
   add("user","you",t);
   setBusy(true);
-  const p=UIContracts.turnStart({threadId:cur,text:t,
+  const p=UIContracts.turnStart({threadId,text:t,
     model:$("#selModel").value,effort:$("#selEffort").value,
     approvalPolicy:$("#selAppr").value,
     serviceTier:$("#selTier")&&$("#selTier").value});
   const r=await rpc("turn/start",p,900);
+  if(cur!==threadId) return;
   if(r.error){ add("err","turn/start",JSON.stringify(r.error).slice(0,400)); setBusy(false); return; }
   const tn=(r.result||{}).turn||{};
   if(tn.id) curTurn=tn.id;
-  refreshMetaAfterTurnStart(cur);
+  refreshMetaAfterTurnStart(threadId);
 }
 $("#send").onclick=send;
 $("#stop").onclick=async()=>{
   if(!cur) return;
+  const threadId=cur;
   const stopTo=await activeTurnId();
+  if(cur!==threadId) return;
   if(!stopTo){ add("err","stop","no active turn to interrupt"); return; }
-  const r=await rpc("turn/interrupt",{threadId:cur,turnId:stopTo},30);
-  if(r.error) add("err","turn/interrupt",JSON.stringify(r.error).slice(0,300));
+  const r=await rpc("turn/interrupt",{threadId,turnId:stopTo},30);
+  if(r.error&&cur===threadId) add("err","turn/interrupt",JSON.stringify(r.error).slice(0,300));
 };
 $("#inp").addEventListener("keydown",e=>{
   if(e.key!=="Enter") return;
@@ -1172,21 +1274,14 @@ $("#wpause").onclick=()=>{ wirePaused=!wirePaused;
 /* ---------- approvals ---------- */
 /* Decision vocabulary DIFFERS per request type -- sending "approved" to a
    request that expects "accept" is treated as a rejection (observed live).
-     execCommandApproval / applyPatchApproval -> approved | approved_for_session | abort
-     item/commandExecution|fileChange/...     -> accept   | acceptForSession     | decline
-     item/permissions/requestApproval         -> {permissions, scope, strictAutoReview}
-     item/tool/requestUserInput               -> {answers}                                */
-function approvalVocab(method){
-  if(/^(execCommandApproval|applyPatchApproval)$/.test(method))
-    return {yes:"approved", always:"approved_for_session", no:"abort", key:"decision"};
-  if(/requestApproval$/.test(method))
-    return {yes:"accept", always:"acceptForSession", no:"decline", key:"decision"};
-  return null;
-}
-const apprEls={};                 // request id -> approval element
+   UIContracts owns the exact method map and response builders so tests can
+   compare them with the installed app-server schema. */
+const apprEls={};                 // request id -> {el, threadId, turnId}
 function retireApproval(id,label){
-  const d=apprEls[id];
-  if(!d) return;
+  const record=apprEls[id];
+  if(!record) return;
+  const d=record.el;
+  const stick=atBottom();
   d.querySelectorAll("button").forEach(b=>b.remove());
   if(!d.querySelector(".resolved")){
     const s2=document.createElement("span");
@@ -1201,12 +1296,125 @@ function retireApproval(id,label){
   // resolved prompts stack up and crowd out live ones. The warning border is
   // scoped to `#approvals .appr`, so it falls away on the move.
   logEl.append(d);
-  logEl.scrollTop=logEl.scrollHeight;
+  if(stick) logEl.scrollTop=logEl.scrollHeight;
   delete apprEls[id];
+}
+function promptError(d,error){
+  let e=d.querySelector(".prompt-error");
+  if(!e){ e=document.createElement("div"); e.className="prompt-error"; d.append(e); }
+  e.textContent=String(error&&error.message||error);
+}
+function questionField(d,q){
+  const wrap=document.createElement("div"); wrap.className="q"; wrap.dataset.questionId=q.id;
+  const label=document.createElement("label"); label.textContent=q.header||q.id;
+  const help=document.createElement("small"); help.textContent=q.question||"";
+  wrap.append(label,help);
+  if(q.options&&q.options.length){
+    const select=document.createElement("select"); select.dataset.answer="choice";
+    for(const option of q.options){
+      const el=document.createElement("option"); el.value=option.label; el.textContent=option.label;
+      if(option.description) el.title=option.description;
+      select.append(el);
+    }
+    if(q.isOther){
+      const el=document.createElement("option"); el.value="__other__"; el.textContent="Other";
+      select.append(el);
+      const other=document.createElement("input"); other.dataset.answer="other";
+      other.placeholder="Other answer"; other.style.display="none";
+      select.onchange=()=>other.style.display=select.value==="__other__"?"block":"none";
+      wrap.append(select,other);
+    } else wrap.append(select);
+  } else {
+    const input=document.createElement("input"); input.dataset.answer="text";
+    input.type=q.isSecret?"password":"text"; wrap.append(input);
+  }
+  d.append(wrap);
+}
+function collectQuestions(d){
+  const entries=[];
+  for(const q of d.querySelectorAll(".q[data-question-id]")){
+    const choice=q.querySelector('[data-answer="choice"]');
+    const other=q.querySelector('[data-answer="other"]');
+    const text=q.querySelector('[data-answer="text"]');
+    let value=choice?(choice.value==="__other__"?(other&&other.value.trim()):choice.value)
+                    :(text&&text.value.trim());
+    if(!value) throw new Error(`Answer required: ${q.dataset.questionId}`);
+    entries.push([q.dataset.questionId,[value]]);
+  }
+  return entries;
+}
+function elicitationField(d,name,schema,required){
+  const wrap=document.createElement("div"); wrap.className="q"; wrap.dataset.elicit=name;
+  wrap.dataset.required=required?"true":"false";
+  const label=document.createElement("label"); label.textContent=schema.title||name;
+  if(schema.description){ const help=document.createElement("small"); help.textContent=schema.description; wrap.append(label,help); }
+  else wrap.append(label);
+  let input;
+  const arrayChoices=schema.type==="array"&&schema.items&&
+    (schema.items.enum||(schema.items.anyOf&&schema.items.anyOf.map(x=>x.const)));
+  const choices=arrayChoices||schema.enum||(schema.oneOf&&schema.oneOf.map(x=>x.const));
+  if(choices){
+    input=document.createElement("select");
+    input.multiple=Boolean(arrayChoices);
+    for(const [i,value] of choices.entries()){
+      const option=document.createElement("option"); option.value=value;
+      option.textContent=(schema.enumNames&&schema.enumNames[i])||
+        (schema.oneOf&&schema.oneOf[i]&&schema.oneOf[i].title)||
+        (schema.items&&schema.items.anyOf&&schema.items.anyOf[i]&&
+         schema.items.anyOf[i].title)||value;
+      input.append(option);
+    }
+  } else if(schema.type==="boolean"){
+    input=document.createElement("input"); input.type="checkbox";
+  } else {
+    input=document.createElement("input");
+    input.type=(schema.type==="number"||schema.type==="integer")?"number":
+               (schema.format==="email"?"email":schema.format==="date"?"date":
+                schema.format==="date-time"?"datetime-local":"text");
+    if(schema.minimum!==undefined) input.min=String(schema.minimum);
+    if(schema.maximum!==undefined) input.max=String(schema.maximum);
+    if(schema.minLength!==undefined) input.minLength=schema.minLength;
+    if(schema.maxLength!==undefined) input.maxLength=schema.maxLength;
+  }
+  input.dataset.answer="elicitation";
+  if(schema.default!==undefined&&schema.default!==null){
+    if(input.type==="checkbox") input.checked=Boolean(schema.default);
+    else if(input.multiple){
+      const selected=new Set(schema.default||[]);
+      for(const option of input.options) option.selected=selected.has(option.value);
+    } else input.value=String(schema.default);
+  }
+  if(schema.minItems!==undefined) input.dataset.minItems=String(schema.minItems);
+  if(schema.maxItems!==undefined) input.dataset.maxItems=String(schema.maxItems);
+  wrap.append(input); d.append(wrap);
+}
+function collectElicitation(d){
+  const content={};
+  for(const q of d.querySelectorAll(".q[data-elicit]")){
+    const input=q.querySelector('[data-answer="elicitation"]');
+    let value=input.multiple?[...input.selectedOptions].map(x=>x.value):
+              (input.type==="checkbox"?input.checked:input.value);
+    const empty=Array.isArray(value)?value.length===0:value==="";
+    if(q.dataset.required==="true"&&empty) throw new Error(`Value required: ${q.dataset.elicit}`);
+    if(input.dataset.minItems!==undefined&&value.length<Number(input.dataset.minItems))
+      throw new Error(`Select at least ${input.dataset.minItems}: ${q.dataset.elicit}`);
+    if(input.dataset.maxItems!==undefined&&value.length>Number(input.dataset.maxItems))
+      throw new Error(`Select at most ${input.dataset.maxItems}: ${q.dataset.elicit}`);
+    if(empty&&q.dataset.required!=="true") continue;
+    if(input.type==="number") value=Number(value);
+    content[q.dataset.elicit]=value;
+  }
+  const raw=d.querySelector('[data-answer="elicitation-json"]');
+  if(raw){
+    try{ return JSON.parse(raw.value||"{}"); }
+    catch(e){ throw new Error("Form response must be valid JSON"); }
+  }
+  return content;
 }
 function approval(id,method,params){
   const d=document.createElement("div"); d.className="appr";
-  apprEls[id]=d;
+  apprEls[id]={el:d,threadId:params&&params.threadId,
+               turnId:params&&params.turnId};
   const t=document.createElement("div"); t.className="t";
   t.textContent="approval — "+method;
   const pre=document.createElement("pre");
@@ -1216,34 +1424,67 @@ function approval(id,method,params){
     :JSON.stringify(params,null,1).slice(0,1600);
   d.append(t,pre);
 
-  const v=approvalVocab(method);
-  const settle=(label,payload)=>{
-    respond(id,payload);
-    retireApproval(id,label);
+  const kind=UIContracts.serverRequests[method];
+  const v=UIContracts.approvalVocab(method);
+  const settle=async(label,payload)=>{
+    d.querySelectorAll("button").forEach(b=>b.disabled=true);
+    try{ await respond(id,payload); retireApproval(id,label); }
+    catch(e){ d.querySelectorAll("button").forEach(b=>b.disabled=false); promptError(d,e); }
   };
 
   if(v){
     const mk=(txt,cls,val)=>{
       const b=document.createElement("button"); b.textContent=txt;
       if(cls) b.className=cls;
-      b.onclick=()=>settle(txt.toLowerCase(),{[v.key]:val});
+      b.onclick=()=>settle(txt.toLowerCase(),{decision:val});
       d.append(b);
     };
     mk("Approve","yes",v.yes);
     mk("Always",null,v.always);
     mk("Deny","no",v.no);
-  } else if(/permissions\/requestApproval/.test(method)){
+  } else if(kind==="permissions"){
     // grant exactly what was asked for, scoped to this turn
     const b=document.createElement("button"); b.className="yes"; b.textContent="Grant";
-    b.onclick=()=>settle("granted",
-      {permissions:(params&&params.permissions)||null,scope:"turn",strictAutoReview:false});
+    b.onclick=()=>settle("granted",UIContracts.permissionResponse(params,true));
     const n=document.createElement("button"); n.className="no"; n.textContent="Deny";
-    n.onclick=()=>settle("denied",{permissions:null,scope:"turn",strictAutoReview:true});
+    n.onclick=()=>settle("denied",UIContracts.permissionResponse(params,false));
     d.append(b,n);
-  } else {
-    const b=document.createElement("button"); b.textContent="Dismiss";
-    b.onclick=()=>settle("dismissed",{});
+  } else if(kind==="userInput"){
+    pre.remove();
+    for(const q of (params.questions||[])) questionField(d,q);
+    const b=document.createElement("button"); b.className="yes"; b.textContent="Submit";
+    b.onclick=()=>{ try{ settle("answered",UIContracts.userInputResponse(collectQuestions(d))); }
+                     catch(e){ promptError(d,e); } };
     d.append(b);
+  } else if(kind==="elicitation"){
+    pre.textContent=params.message||`Request from ${params.serverName||"MCP server"}`;
+    const safeElicitationUrl=params.mode!=="url"||/^https?:\/\//i.test(params.url||"");
+    if(params.mode==="form"){
+      const schema=params.requestedSchema||{}, required=new Set(schema.required||[]);
+      for(const [name,field] of Object.entries(schema.properties||{}))
+        elicitationField(d,name,field,required.has(name));
+    } else if(params.mode==="openai/form"){
+      const wrap=document.createElement("div"); wrap.className="q";
+      const label=document.createElement("label"); label.textContent="Response (JSON)";
+      const input=document.createElement("textarea"); input.dataset.answer="elicitation-json";
+      input.value="{}"; wrap.append(label,input); d.append(wrap);
+    } else if(params.mode==="url"&&safeElicitationUrl){
+      const link=document.createElement("a"); link.href=params.url; link.target="_blank";
+      link.rel="noreferrer"; link.textContent=params.url; d.append(link);
+    } else if(params.mode==="url"){
+      promptError(d,"MCP elicitation URL must use http or https");
+    }
+    const accept=document.createElement("button"); accept.className="yes"; accept.textContent="Accept";
+    accept.disabled=!safeElicitationUrl;
+    accept.onclick=()=>{ try{ settle("accepted",UIContracts.elicitationResponse(
+      "accept",params.mode==="url"?undefined:collectElicitation(d))); }catch(e){ promptError(d,e); } };
+    const decline=document.createElement("button"); decline.className="no"; decline.textContent="Decline";
+    decline.onclick=()=>settle("declined",UIContracts.elicitationResponse("decline"));
+    const cancel=document.createElement("button"); cancel.textContent="Cancel";
+    cancel.onclick=()=>settle("cancelled",UIContracts.elicitationResponse("cancel"));
+    d.append(accept,decline,cancel);
+  } else {
+    promptError(d,`Unsupported server request: ${method}`);
   }
   // NOT logEl: switching threads does logEl.innerHTML="" which destroyed the
   // element while the app-server was still waiting for an answer -- an approval
@@ -1259,17 +1500,20 @@ function approval(id,method,params){
    the view, compare what the server holds against what we have rendered, and
    re-render if the server is ahead. */
 let reconciling=false;
-async function reconcile(force){
+async function reconcile(){
   if(!cur || reconciling) return;
-  if(busy && !force) return;              // never disturb an active stream
+  // Never replace nodes that streamEl/reasonEl still point into. A forced
+  // focus refresh used to detach those nodes mid-turn, so later deltas were
+  // appended invisibly. Completion and the idle poll will reconcile safely.
+  if(busy) return;
   reconciling=true;
   try{
     const t=await (await fetch("/transcript?id="+encodeURIComponent(cur))).json();
-    const n=(t.rows||[]).length;
-    if(n>renderedFromRollout){
+    const rows=t.rows||[], n=rows.length;
+    if(n!==renderedFromRollout){
       const atEnd=logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<80;
-      await open_(cur);
-      if(atEnd) logEl.scrollTop=logEl.scrollHeight;
+      const previousTop=logEl.scrollTop;
+      renderTranscript(rows,{atEnd,scrollTop:previousTop});
     }
   }catch(e){}
   finally{ reconciling=false; }
@@ -1279,7 +1523,26 @@ async function reconcile(force){
 const es=new EventSource("/events");
 es.onopen=()=>$("#dot").classList.add("on");
 es.onerror=()=>$("#dot").classList.remove("on");
-es.onmessage=ev=>{
+async function handleServerRequest(m){
+  const method=m.method, kind=UIContracts.serverRequests[method];
+  if(kind==="currentTime"){
+    try{ await respond(m.id,UIContracts.currentTimeResponse()); }
+    catch(e){ add("err",method,String(e)); }
+    return;
+  }
+  if(kind==="unsupported"){
+    const error=UIContracts.unsupportedRequestError(method);
+    try{ await respond(m.id,undefined,error); }
+    catch(e){ add("err",method,String(e)); return; }
+    add("err",method,error.message);
+    return;
+  }
+  if(kind){ approval(m.id,method,m.params||{}); return; }
+  const error=UIContracts.unsupportedRequestError(method||"unknown server request");
+  try{ await respond(m.id,undefined,error); }catch(e){}
+  add("err","server request",error.message);
+}
+es.onmessage=async ev=>{
   let m; try{ m=JSON.parse(ev.data); }catch{ return; }
   const meth=m.method, p=m.params||{};
 
@@ -1289,9 +1552,11 @@ es.onmessage=ev=>{
     $("#dot").classList.remove("on");
     add("err","bridge","app-server disconnected: "+(p.error||"")); return;
   }
-  // server -> client request (approval / user input)
-  if(m.id!==undefined&&meth&&!("result"in m)&&!("error"in m)){
-    if(/approval|requestUserInput|elicitation/i.test(meth)){ approval(m.id,meth,p); return; }
+  // Every advertised server -> client request is either answered immediately
+  // or rendered as an interactive prompt. Unknown additions get an explicit
+  // JSON-RPC error instead of leaving the app-server waiting forever.
+  if(m.id!==undefined&&!("result"in m)&&!("error"in m)){
+    await handleServerRequest(m); return;
   }
   // events belonging to the sub-agent shown in the side pane
   if(p.threadId&&agentCur&&p.threadId===agentCur){
@@ -1305,7 +1570,11 @@ es.onmessage=ev=>{
     } else if(meth==="turn/completed"||meth==="turn/failed"){ aStream=null; }
     return;
   }
-  if(p.threadId&&cur&&p.threadId!==cur){ if(/turn\/(completed|failed|started)/.test(meth)) loadThreads(); return; }
+  if(p.threadId&&cur&&p.threadId!==cur){
+    if(/^(turn\/(completed|failed|started)|thread\/(status|project|queue|closed|archived|unarchived|deleted))/.test(meth||""))
+      loadThreads();
+    return;
+  }
 
   if(meth==="turn/started"){
     setBusy(true); streamEl=null; reasonEl=null;
@@ -1320,22 +1589,29 @@ es.onmessage=ev=>{
           meth==="turn/failed"?"failed":"ended");
       }
     }
-    for(const k of Object.keys(apprEls)) retireApproval(k,"expired");
+    const finishedTurn=(p.turn&&p.turn.id)||p.turnId;
+    for(const [k,record] of Object.entries(apprEls)){
+      const sameThread=!record.threadId||!p.threadId||record.threadId===p.threadId;
+      const sameTurn=!record.turnId||!finishedTurn||record.turnId===finishedTurn;
+      if(sameThread&&sameTurn) retireApproval(k,"expired");
+    }
     streamEl=null; reasonEl=null; curTurn=null; loadThreads();
-    if(cur){ loadMeta(cur); loadAgents(); setTimeout(()=>reconcile(true),1200); }
+    if(cur){ loadMeta(cur); loadAgents(); setTimeout(()=>reconcile(),1200); }
     if(meth==="turn/failed") add("err","turn failed",JSON.stringify(p).slice(0,500));
   }
   else if(meth==="item/agentMessage/delta"){
+    const stick=atBottom();
     if(!streamEl) streamEl=add("agent","codex","");
     streamEl.dataset.raw=(streamEl.dataset.raw||"")+(p.delta??p.text??"");
     streamEl.textContent=streamEl.dataset.raw;   // plain while streaming: half-written
-    logEl.scrollTop=logEl.scrollHeight;          // markdown renders wrong mid-token
+    if(stick) logEl.scrollTop=logEl.scrollHeight; // markdown renders wrong mid-token
   }
   else if(/reasoning.*delta/i.test(meth||"")){
+    const stick=atBottom();
     if(!reasonEl) reasonEl=add("rsn","thinking","");
     reasonEl.dataset.raw=(reasonEl.dataset.raw||"")+(p.delta??p.text??"");
     reasonEl.textContent=reasonEl.dataset.raw;
-    logEl.scrollTop=logEl.scrollHeight;
+    if(stick) logEl.scrollTop=logEl.scrollHeight;
   }
   else if(meth==="item/started"){
     const ty=String((p.item||{}).type||"");
@@ -1353,25 +1629,42 @@ es.onmessage=ev=>{
     // resolved here, by another client, or cleared by turn lifecycle
     retireApproval(p.requestId,"resolved");
   }
-  else if(/^thread\/(started|created|archived|unarchived|deleted|status\/changed|name)/.test(meth||"")){
+  else if(/^thread\/(started|created|archived|unarchived|deleted|closed|status\/changed|name|queue\/changed)/.test(meth||"")){
+    if(meth==="thread/closed") setBusy(false);
     loadThreads();
   }
+  else if(meth==="thread/reverted"||meth==="thread/compacted"){
+    loadThreads();
+    if(cur) setTimeout(()=>reconcile(),100);
+  }
+  else if(meth==="thread/settings/updated"||meth==="thread/tokenUsage/updated"){
+    if(cur) loadMeta(cur);
+  }
+  else if(meth==="thread/project/updated"||meth==="project/changed"){
+    loadThreads(); // loadThreads refreshes the project registry first
+  }
+  else if(meth==="model/rerouted"){
+    if(cur) loadMeta(cur);
+    add("tool","model rerouted",JSON.stringify(p).slice(0,500));
+  }
   else if(/subAgent|spawn|collabAgent/i.test(meth||"")){ loadAgents(); }
+  else if(meth==="error"){
+    const detail=(p.error&&p.error.message)||p.error||p;
+    add("err",p.willRetry?"error · retrying":"error",
+        typeof detail==="string"?detail:JSON.stringify(detail).slice(0,800));
+  }
+  else if(meth==="warning"||meth==="guardianWarning"){
+    add("err","warning",p.message||JSON.stringify(p).slice(0,800));
+  }
+  else if(meth==="configWarning"||meth==="deprecationNotice"){
+    add("err",meth==="configWarning"?"configuration warning":"deprecation",
+        [p.summary,p.details,p.path].filter(Boolean).join("\n"));
+  }
   else if(meth==="account/rateLimits/updated"){
-    const rl=p.rateLimits||p;
-    if(rl&&(rl.primary||rl.secondary)){
-      const q={result:{rateLimits:rl}};
-      // reuse the renderer by faking the rpc shape
-      (async()=>{ const prev=window.__rl; window.__rl=rl; try{
-        const pr=rl.primary, sc=rl.secondary; let html="";
-        if(pr) html+=bar(human(pr.windowDurationMins||300),pr);
-        if(sc) html+=bar(human(sc.windowDurationMins||10080),sc);
-        const cr=rl.credits||{};
-        html+=`<div class="plan"><span>${rl.planType||""}</span><span>${
-          cr.unlimited?"unlimited":(cr.hasCredits?("credits "+cr.balance):"")}</span></div>`;
-        $("#usage").innerHTML=html;
-      }catch(e){ window.__rl=prev; } })();
-    } else loadUsage();
+    // Read back the canonical aggregate. The notification omits reset credits
+    // and has drifted from the read response before; one renderer avoids two
+    // contradictory usage panels.
+    loadUsage();
   }
 };
 
@@ -1392,9 +1685,9 @@ es.onmessage=ev=>{
   setInterval(()=>{ if(!document.hidden) loadUsage(); },120000);
   setInterval(()=>{ loadThreads(); },1000);
   setInterval(()=>{ loadAgents(); },5000);   // sub-agent counts + Agents tab
-  setInterval(()=>{ reconcile(false); },6000);  // backfill anything never displayed        // threads must appear promptly,
+  setInterval(()=>{ reconcile(); },6000);  // backfill anything never displayed
                                                    // even while backgrounded
   document.addEventListener("visibilitychange",()=>{ if(!document.hidden){
-    loadThreads(); loadUsage(); if(cur){ loadMeta(cur); reconcile(true); } } });
+    loadThreads(); loadUsage(); if(cur){ loadMeta(cur); reconcile(); } } });
 })();
 </script>
