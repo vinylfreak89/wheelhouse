@@ -28,6 +28,7 @@ class FakeApp:
         self.calls = []
         self.notifications = []
         self.responses = []
+        self.response_errors = []
         self.broadcasts = []
 
     def call(self, method, params, timeout=300):
@@ -39,6 +40,9 @@ class FakeApp:
 
     def respond(self, request_id, result):
         self.responses.append((request_id, result))
+
+    def respond_error(self, request_id, error):
+        self.response_errors.append((request_id, error))
 
     def _broadcast(self, message):
         self.broadcasts.append(message)
@@ -93,7 +97,7 @@ class HandlerContractTests(unittest.TestCase):
             "result": {"method": "thread/list"},
         })
 
-    def test_notify_and_approval_response_contracts(self):
+    def test_notify_and_success_response_contracts(self):
         payload = json.dumps({
             "method": "initialized",
             "params": {},
@@ -112,6 +116,25 @@ class HandlerContractTests(unittest.TestCase):
             [(12, {"decision": "accept"})],
         )
         self.assertEqual(json.loads(sent[0][1]), {"ok": True})
+
+    def test_error_response_contract(self):
+        payload = json.dumps({
+            "id": 13,
+            "error": {"code": -32601, "message": "unsupported"},
+        }).encode()
+        request, sent = handler("/respond", payload)
+        request.do_POST()
+        self.assertEqual(
+            self.app.response_errors,
+            [(13, {"code": -32601, "message": "unsupported"})],
+        )
+        self.assertEqual(json.loads(sent[0][1]), {"ok": True})
+
+    def test_response_requires_a_request_id(self):
+        request, sent = handler("/respond", b'{"result":{}}')
+        request.do_POST()
+        self.assertEqual((sent[0][0], json.loads(sent[0][1])),
+                         (400, {"error": "no id"}))
 
     def test_bad_json_missing_method_and_unknown_path(self):
         request, sent = handler("/rpc", b"{")
@@ -199,10 +222,13 @@ class AppServerFramingTests(unittest.TestCase):
         app._write = written.append
         app.notify("initialized", {})
         app.respond(9, {"decision": "decline"})
+        app.respond_error(10, {"code": -32601, "message": "unsupported"})
         self.assertEqual(written, [
             {"jsonrpc": "2.0", "method": "initialized", "params": {}},
             {"jsonrpc": "2.0", "id": 9,
              "result": {"decision": "decline"}},
+            {"jsonrpc": "2.0", "id": 10,
+             "error": {"code": -32601, "message": "unsupported"}},
         ])
 
 

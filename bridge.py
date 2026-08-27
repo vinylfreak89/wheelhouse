@@ -177,6 +177,10 @@ class AppServer:
         """Answer a server->client request (e.g. an approval)."""
         self._write({"jsonrpc": "2.0", "id": req_id, "result": result})
 
+    def respond_error(self, req_id, error):
+        """Reject a server->client request with a JSON-RPC error object."""
+        self._write({"jsonrpc": "2.0", "id": req_id, "error": error})
+
     def subscribe(self):
         q = queue.Queue(maxsize=4000)
         self.subscribers.append(q)
@@ -480,7 +484,12 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._send(400, b'{"error":"bad json"}')
         if self.path == "/respond":
-            APP.respond(req.get("id"), req.get("result", {}))
+            if "id" not in req:
+                return self._send(400, b'{"error":"no id"}')
+            if "error" in req:
+                APP.respond_error(req["id"], req["error"])
+            else:
+                APP.respond(req["id"], req.get("result", {}))
             return self._send(200, b'{"ok":true}')
         if self.path != "/rpc":
             return self._send(404, b"{}")
