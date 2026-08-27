@@ -1196,6 +1196,12 @@ function retireApproval(id,label){
     d.append(s2);
   }
   d.style.opacity=".6";
+  // Answered approvals leave the pending tray and drop INLINE into the
+  // conversation, where they read as history. Leaving them in the tray made
+  // resolved prompts stack up and crowd out live ones. The warning border is
+  // scoped to `#approvals .appr`, so it falls away on the move.
+  logEl.append(d);
+  logEl.scrollTop=logEl.scrollHeight;
   delete apprEls[id];
 }
 function approval(id,method,params){
