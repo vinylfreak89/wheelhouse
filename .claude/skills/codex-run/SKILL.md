@@ -259,6 +259,32 @@ Failures observed building this loop, each of which the protocol below prevents:
    unrunnable, say so and ask, because silently substituting your own version
    destroys the prespecification.
 4. **Codex interprets** against its own fixed thresholds.
+5. **Hook every dispatch before you move on.** A turn that ends with unhooked
+   background work means you find out it finished by remembering to poll -- and
+   you will forget. Codex went idle for a full exchange once while the driver
+   kept saying "still running", because nothing was watching it.
+
+### Never leave work unhooked
+
+Both halves of the loop run in the background, and both need a hook:
+
+    # Codex: wait for the turn, then surface the artifact it wrote
+    i=0; while [ "$(codex-run busy "$TID" | awk '{print $1}')" != "idle" ] \
+                && [ "$i" -lt 60 ]; do sleep 30; i=$((i+1)); done
+
+    # your own long runs: wait on the PROCESS, not a fixed sleep
+    i=0; while pgrep -f myrun.py >/dev/null && [ "$i" -lt 240 ]; do
+           sleep 60; i=$((i+1)); done
+
+Launch those with Bash `run_in_background: true` so their exit fires a task
+notification. Both forms cap their iterations: an unbounded wait on a job that
+died silently hangs until the turn ends.
+
+Prefer ONE hook covering several jobs when they are serialised behind each
+other -- one notification when the queue drains beats four interleaved ones.
+`codex-run on-file <path> <id> <taskfile>` is the stronger form when the next
+step is itself a dispatch: it waits for a file to appear AND stop changing,
+waits out any active turn, then sends the follow-up without you in the loop.
 
 ### Why prespecification is the point
 
