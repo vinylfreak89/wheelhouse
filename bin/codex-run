@@ -519,6 +519,18 @@ def transcript(tid, tail=None):
     return out[-tail:] if tail else out
 
 
+def thread_settings(tid):
+    """The thread's CURRENT effective settings, straight from the bridge.
+
+    The protocol's thread object does not report model / effort / approvals, so
+    the bridge reads what was actually used out of the state DB.
+    """
+    try:
+        return _req(f"/threadmeta?id={tid}", None, 10) or {}
+    except Exception:
+        return {}
+
+
 def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     """Send a long prompt from a file, optionally attaching a skill item.
 
@@ -530,7 +542,13 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     if skill:
         inp.append({"type": "skill", "name": skill,
                     "path": skill_path or _skill_path(skill)})
-    p = {"threadId": tid, "input": inp, "effort": effort or DEFAULT_EFFORT}
+    # Only send what was explicitly asked for. Omitting a parameter makes the
+    # server use the THREAD's current setting -- which is what the owner sees in
+    # the UI and may have deliberately changed. Forcing DEFAULT_EFFORT on every
+    # turn silently reverted those changes on the next dispatch.
+    p = {"threadId": tid, "input": inp}
+    if effort:
+        p["effort"] = effort
     # Writes are scoped to the turn's cwd under workspace-write. If the work
     # happens outside the thread's own directory (a sandbox, a worktree), the
     # turn MUST carry that cwd or every write fails with "Operation not
@@ -539,6 +557,12 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
         p["cwd"] = os.path.abspath(os.path.expanduser(cwd))
     # A Codex turn WRITES. Hold the tree lock for its duration so nothing else
     # edits this checkout underneath it (and vice versa).
+    st = thread_settings(tid)
+    print("turn: model=%s effort=%s approvals=%s%s" % (
+        st.get("model") or "?",
+        effort or (st.get("reasoning_effort") or "thread default"),
+        st.get("approval_mode") or "?",
+        "  (effort overridden)" if effort else ""), file=sys.stderr)
     held = lock_acquire(f"codex:{tid[:8]}", note="turn in progress",
                         wait=int(os.environ.get("LOCK_WAIT", "0")))
     if not held:
@@ -612,9 +636,10 @@ def errors_of(tid):
 
 
 def send(tid, text, model=None, effort=None):
+    # Same rule as send_file: inherit the thread's settings unless overridden.
     p = {"threadId": tid, "input": [{"type": "text", "text": text}]}
     if model: p["model"] = model
-    p["effort"] = effort or DEFAULT_EFFORT
+    if effort: p["effort"] = effort
     before = len(transcript(tid))
     rpc("turn/start", p, 900)
     wait_idle(tid)

@@ -408,8 +408,19 @@ Mirror how Claude runs it: resume, then step in order, one sub-agent per stage.
 
 ## Effort is a budget decision, not a default
 
-`codex-run` defaults to `xhigh`, but **match the tier to the work** — a blanket
-`xhigh` burned 92% of a 5-hour window on one transcript-reading pass.
+**A turn inherits the thread's CURRENT settings unless you override them.**
+Model, effort and approval policy are omitted from `turn/start` when you do not
+pass them, so the server uses whatever the thread is set to — which is what the
+owner sees in the UI and may have deliberately changed. Sending `effort` on
+every turn silently reverted their choice on the next dispatch, so only send it
+when you have a reason. `codex-run` prints the effective settings at dispatch,
+marking whether the effort came from the thread or from you.
+
+`new` still applies `CODEX_EFFORT` (default `xhigh`) when CREATING a thread,
+because a new thread has no prior state to inherit.
+
+When you do override, **match the tier to the work** — a blanket `xhigh` burned
+92% of a 5-hour window on one transcript-reading pass.
 
 | work | tier |
 |---|---|
