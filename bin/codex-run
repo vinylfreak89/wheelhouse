@@ -143,37 +143,85 @@ def rpc(method, params=None, timeout=300):
     return r.get("result", {})
 
 
-def chat_title():
-    """The title of the Claude chat that is driving this.
+CLAUDE_SESSIONS_DIR = os.path.expanduser(
+    "~/Library/Application Support/Claude/claude-code-sessions")
 
-    Threads should be findable from the conversation that spawned them, so the
-    default name is "[project] <chat title>". The desktop app stores the title
-    in its session JSON; pick the most recently active session whose cwd matches
-    ours. Returns None if it cannot be determined -- callers must cope.
-    """
+
+def _session_recency(session):
+    """Comparable timestamp for the fallback path when no session id exists."""
+    from datetime import datetime
+    value = session.get("lastActivityAt") or session.get("lastFocusedAt") or 0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0
+    return 0
+
+
+def _claude_sessions():
+    """Yield live Claude desktop session records, tolerating partial files."""
     import glob
-    root = os.path.expanduser(
-        "~/Library/Application Support/Claude/claude-code-sessions")
-    here = os.path.abspath(os.getcwd())
-    best, best_ts = None, -1
-    for f in glob.glob(os.path.join(root, "*", "*", "*.json")):
-        if os.path.basename(f).startswith("deleted_"):
+    for path in glob.glob(os.path.join(CLAUDE_SESSIONS_DIR, "*", "*", "*.json")):
+        if os.path.basename(path).startswith("deleted_"):
             continue
         try:
-            d = json.load(open(f))
+            with open(path, encoding="utf-8") as f:
+                session = json.load(f)
         except Exception:
             continue
-        if not isinstance(d, dict) or d.get("isArchived"):
-            continue
-        cwd = os.path.abspath(d.get("cwd") or d.get("originCwd") or "")
-        if cwd != here:
-            continue
-        ts = d.get("lastActivityAt") or d.get("lastFocusedAt") or 0
-        if isinstance(ts, str):
-            ts = len(ts)            # crude but monotone enough for ISO strings
-        if ts > best_ts and d.get("title"):
-            best, best_ts = d["title"], ts
-    return best
+        if isinstance(session, dict) and not session.get("isArchived"):
+            yield session
+
+
+def chat_identity():
+    """Return ``(stable session id, title)`` for the driving Claude chat.
+
+    Claude exports both the desktop record's ``sessionId`` and its
+    ``cliSessionId``. Resolve either representation to the record and store the
+    canonical ``sessionId`` in Wheelhouse's registry. This avoids confusing two
+    chats merely because they share a cwd and one became active more recently.
+
+    Direct terminal use has no Claude session environment. Preserve the old
+    cwd/recency lookup there as a best-effort fallback.
+    """
+    sessions = list(_claude_sessions())
+    hints = [v for v in (
+        # HOST_SESSION_ID is the desktop record's canonical sessionId; the
+        # other value is its cliSessionId on current Claude Code builds.
+        os.environ.get("CLAUDE_CODE_HOST_SESSION_ID"),
+        os.environ.get("CLAUDE_CODE_SESSION_ID"),
+    ) if v]
+    for hint in hints:
+        for session in sessions:
+            if hint not in (session.get("sessionId"), session.get("cliSessionId")):
+                continue
+            stable = session.get("sessionId") or session.get("cliSessionId") or hint
+            return stable, session.get("title")
+
+    # The environment id remains a useful stable binding even if Claude has not
+    # flushed its session JSON yet. The display name can fall back separately.
+    if hints:
+        return hints[0], None
+
+    here = os.path.abspath(os.getcwd())
+    candidates = []
+    for session in sessions:
+        cwd = os.path.abspath(session.get("cwd") or session.get("originCwd") or "")
+        if cwd == here and session.get("title"):
+            candidates.append(session)
+    if not candidates:
+        return None, None
+    session = max(candidates, key=_session_recency)
+    stable = session.get("sessionId") or session.get("cliSessionId")
+    return stable, session.get("title")
+
+
+def chat_title():
+    """The title of the Claude chat that is driving this, when discoverable."""
+    return chat_identity()[1]
 
 
 def default_name(cwd=None):
@@ -254,7 +302,13 @@ def bind_project(tid, root=None, name=None):
         entry = {"root": (entry or {}).get("root", root) if not name else root,
                  "name": name or reg["roots"].get(root) or project_name(root)}
         reg["threads"][tid] = entry
-    entry.setdefault("chat", chat_title() or "")
+    chat_id, title = chat_identity()
+    if title and not entry.get("chat"):
+        entry["chat"] = title
+    else:
+        entry.setdefault("chat", "")
+    if chat_id:
+        entry.setdefault("chat_id", chat_id)
     reg["roots"].setdefault(entry["root"], entry["name"])
     _registry_save(reg)
     return entry
@@ -277,29 +331,55 @@ def find_thread(name, cwd=None):
     Falls back to name matching for threads that predate the registry.
     """
     want_cwd = project_cwd(cwd)
+    want_chat_id, want_title = chat_identity()
+    expected_default = (want_title
+                        or os.path.basename(want_cwd.rstrip("/"))
+                        or "codex session")
+    automatic_name = name == expected_default
     reg = _registry()["threads"]
     live = {t["id"]: t for t in rpc("thread/list", {"limit": 100}, 40).get("data", [])}
 
     def recency(tid):
         t = live.get(tid) or {}
-        return t.get("recencyAt") or t.get("updatedAt") or 0
+        return _session_recency({
+            "lastActivityAt": t.get("recencyAt") or t.get("updatedAt") or 0,
+        })
 
     best, best_ts = None, -1
-    for tid, e in reg.items():
-        if tid not in live:                     # archived or deleted
-            continue
-        if e.get("chat") != name or e.get("root") != want_cwd:
-            continue
-        if recency(tid) > best_ts:
-            best, best_ts = tid, recency(tid)
-    if best:
-        return best
+    if automatic_name and want_chat_id:
+        for tid, entry in reg.items():
+            if tid not in live or entry.get("root") != want_cwd:
+                continue
+            if entry.get("chat_id") != want_chat_id:
+                continue
+            if recency(tid) > best_ts:
+                best, best_ts = tid, recency(tid)
+        if best:
+            return best
+
+    # Lazily migrate a title-only binding written by older Wheelhouse versions.
+    # Never use this path for an entry already bound to a different stable id.
+    if automatic_name:
+        for tid, entry in reg.items():
+            if tid not in live or entry.get("root") != want_cwd:
+                continue
+            if entry.get("chat_id") or entry.get("chat") != name:
+                continue
+            if recency(tid) > best_ts:
+                best, best_ts = tid, recency(tid)
+        if best:
+            return best
 
     for tid, t in live.items():
         if (t.get("name") or "") != name:
             continue
-        pinned = (reg.get(tid) or {}).get("root")
+        binding = reg.get(tid) or {}
+        pinned = binding.get("root")
         if (pinned or t.get("cwd") or want_cwd) != want_cwd:
+            continue
+        # A cosmetic name collision must not cross an existing chat binding.
+        bound_chat_id = binding.get("chat_id")
+        if bound_chat_id and want_chat_id and bound_chat_id != want_chat_id:
             continue
         if recency(tid) > best_ts:
             best, best_ts = tid, recency(tid)

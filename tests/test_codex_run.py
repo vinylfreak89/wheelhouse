@@ -1,0 +1,173 @@
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def load_codex_run():
+    path = REPO / "bin" / "codex-run"
+    loader = importlib.machinery.SourceFileLoader("wheelhouse_codex_run", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+codex_run = load_codex_run()
+
+
+class ChatIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.sessions = Path(self.temp.name) / "sessions"
+        self.sessions.mkdir()
+        self.sessions_patch = mock.patch.object(
+            codex_run, "CLAUDE_SESSIONS_DIR", str(self.sessions))
+        self.sessions_patch.start()
+
+    def tearDown(self):
+        self.sessions_patch.stop()
+        self.temp.cleanup()
+
+    def write_session(self, name, **values):
+        path = self.sessions / "account" / "project" / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(values), encoding="utf-8")
+
+    def test_environment_session_id_beats_more_recent_same_cwd_chat(self):
+        cwd = os.getcwd()
+        self.write_session(
+            "selected",
+            sessionId="local-selected",
+            cliSessionId="cli-selected",
+            title="Selected chat",
+            cwd=cwd,
+            lastActivityAt="2026-08-20T00:00:00Z",
+        )
+        self.write_session(
+            "newer",
+            sessionId="local-newer",
+            cliSessionId="cli-newer",
+            title="Wrong newer chat",
+            cwd=cwd,
+            lastActivityAt="2026-08-27T00:00:00Z",
+        )
+        with mock.patch.dict(os.environ, {
+            "CLAUDE_CODE_SESSION_ID": "cli-selected",
+            "CLAUDE_CODE_HOST_SESSION_ID": "local-selected",
+        }):
+            self.assertEqual(
+                codex_run.chat_identity(),
+                ("local-selected", "Selected chat"),
+            )
+
+    def test_terminal_fallback_uses_timestamp_not_equal_length_strings(self):
+        cwd = os.getcwd()
+        self.write_session(
+            "older",
+            sessionId="local-old",
+            title="Older chat",
+            cwd=cwd,
+            lastActivityAt="2026-08-20T00:00:00Z",
+        )
+        self.write_session(
+            "newer",
+            sessionId="local-new",
+            title="Newer chat",
+            cwd=cwd,
+            lastActivityAt="2026-08-27T00:00:00Z",
+        )
+        with mock.patch.dict(os.environ, {
+            "CLAUDE_CODE_SESSION_ID": "",
+            "CLAUDE_CODE_HOST_SESSION_ID": "",
+        }):
+            self.assertEqual(
+                codex_run.chat_identity(),
+                ("local-new", "Newer chat"),
+            )
+
+
+class ThreadResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.cwd = os.path.abspath(os.getcwd())
+        self.live = [
+            {"id": "wrong", "name": "Same title", "cwd": self.cwd,
+             "updatedAt": 20},
+            {"id": "right", "name": "Renamed by owner", "cwd": self.cwd,
+             "updatedAt": 10},
+        ]
+
+    def test_stable_chat_binding_wins_over_title_and_recency(self):
+        registry = {"threads": {
+            "wrong": {"root": self.cwd, "name": "project",
+                      "chat": "Same title", "chat_id": "local-wrong"},
+            "right": {"root": self.cwd, "name": "project",
+                      "chat": "Same title", "chat_id": "local-right"},
+        }, "roots": {}}
+        with mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-right", "Same title")), \
+             mock.patch.object(codex_run, "_registry", return_value=registry), \
+             mock.patch.object(codex_run, "rpc",
+                               return_value={"data": self.live}):
+            self.assertEqual(codex_run.find_thread("Same title"), "right")
+
+    def test_legacy_title_binding_remains_resolvable(self):
+        registry = {"threads": {
+            "right": {"root": self.cwd, "name": "project",
+                      "chat": "Same title"},
+        }, "roots": {}}
+        with mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-right", "Same title")), \
+             mock.patch.object(codex_run, "_registry", return_value=registry), \
+             mock.patch.object(codex_run, "rpc",
+                               return_value={"data": self.live}):
+            self.assertEqual(codex_run.find_thread("Same title"), "right")
+
+    def test_explicit_name_stays_distinct_before_session_json_is_flushed(self):
+        explicit = {
+            "id": "explicit",
+            "name": "Scratch thread",
+            "cwd": self.cwd,
+            "updatedAt": "2026-08-27T01:00:00Z",
+        }
+        registry = {"threads": {
+            "explicit": {"root": self.cwd, "name": "project",
+                         "chat": "", "chat_id": "local-right"},
+        }, "roots": {}}
+        with mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-right", None)), \
+             mock.patch.object(codex_run, "_registry", return_value=registry), \
+             mock.patch.object(codex_run, "rpc",
+                               return_value={"data": [explicit]}):
+            self.assertEqual(
+                codex_run.find_thread("Scratch thread"),
+                "explicit",
+            )
+
+    def test_bind_project_lazily_adds_stable_chat_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry_path = Path(temp) / "projects.json"
+            registry_path.write_text(json.dumps({
+                "threads": {
+                    "right": {"root": self.cwd, "name": "project",
+                              "chat": "Same title"},
+                },
+                "roots": {self.cwd: "project"},
+            }), encoding="utf-8")
+            with mock.patch.object(codex_run, "REGISTRY", str(registry_path)), \
+                 mock.patch.object(codex_run, "chat_identity",
+                                   return_value=("local-right", "Same title")):
+                codex_run.bind_project("right")
+            saved = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["threads"]["right"]["chat_id"], "local-right")
+
+
+if __name__ == "__main__":
+    unittest.main()

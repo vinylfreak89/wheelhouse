@@ -55,10 +55,13 @@ right project group and the sandbox is scoped to that project. Pass an explicit
 cwd only to override.
 
 **Names are automatic and should stay that way.** `codex-run` names a thread
-after **this chat** — e.g. `API migration review` — read from the title
-of the Claude session whose `cwd` matches, in
-`~/Library/Application Support/Claude/claude-code-sessions/*/*/*.json`. The user
-should be able to look at a Codex thread and know which conversation spawned it.
+after **this chat** — e.g. `API migration review`. It resolves Claude's exported
+session id against the desktop session JSON, then binds the resulting stable id
+and title to the thread. Two chats in the same directory therefore cannot steal
+one another's thread merely by becoming active most recently. Direct terminal
+use, where no Claude session id exists, falls back to the most recently active
+same-directory session. The user should be able to look at a Codex thread and
+know which conversation spawned it.
 
 No `[project]` prefix: the sidebar already groups by `cwd`, so the prefix is
 redundant. Pass an explicit name only when one thread per chat is not enough.

@@ -95,7 +95,9 @@ column means passing `--cwd` to write into a scratch directory silently
 relocates the whole conversation. Here a thread's project is bound **once**, in
 a local registry the bridge serves at `/projects`, and nothing a turn does can
 move it. Thread names are cosmetic for the same reason: resolution goes through
-that registry, so renaming a thread cannot orphan it.
+that registry, bound to the driving Claude chat's stable session id, so renaming
+a thread cannot orphan it and another chat in the same directory cannot claim it
+by becoming active more recently.
 
 ## The GUI
 
