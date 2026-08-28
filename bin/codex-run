@@ -436,13 +436,26 @@ def find_thread(name, cwd=None):
 
     best, best_ts = None, -1
     if automatic_name and want_chat_id:
+        # The CHAT is the identity here, not the directory. A thread stays this
+        # chat's thread even when the chat is driven from some other cwd -- the
+        # tool's own bin/, a subdirectory, a sibling project -- which is exactly
+        # the invariant stated above: one chat, one thread. Filtering on root
+        # before the chat_id match silently broke it. A call from a different
+        # directory matched nothing, and reuse-or-create then made a SECOND
+        # thread for a chat that already had one.
+        #
+        # Root is still cosmetic (sidebar grouping) and still re-pinned by
+        # bind_project on reuse, so a chat that genuinely moves project keeps
+        # its thread and the thread follows it. It only breaks ties now: a
+        # root match outranks a non-match, then recency, so a stale duplicate
+        # can never outrank the thread belonging to the directory in hand.
+        best_key = None
         for tid, entry in reg.items():
-            if tid not in live or entry.get("root") != want_cwd:
+            if tid not in live or entry.get("chat_id") != want_chat_id:
                 continue
-            if entry.get("chat_id") != want_chat_id:
-                continue
-            if recency(tid) > best_ts:
-                best, best_ts = tid, recency(tid)
+            key = (entry.get("root") == want_cwd, recency(tid))
+            if best_key is None or key > best_key:
+                best, best_key = tid, key
         if best:
             return best
 

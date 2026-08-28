@@ -118,6 +118,47 @@ class ThreadResolutionTests(unittest.TestCase):
                                return_value={"data": self.live}):
             self.assertEqual(codex_run.find_thread("Same title"), "right")
 
+    def test_chat_binding_resolves_from_a_foreign_cwd(self):
+        """The chat is the identity; the directory the CLI runs from is not.
+
+        Regression: resolution filtered on root BEFORE matching chat_id, so a
+        call from anywhere else -- the tool's own bin/, a sibling project, /tmp
+        -- matched nothing, and reuse-or-create then started a SECOND thread
+        for a chat that already had one.
+        """
+        registry = {"threads": {
+            "right": {"root": self.cwd, "name": "project",
+                      "chat": "Same title", "chat_id": "local-right"},
+        }, "roots": {}}
+        with mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-right", "Same title")), \
+             mock.patch.object(codex_run, "_registry", return_value=registry), \
+             mock.patch.object(codex_run, "rpc",
+                               return_value={"data": self.live}):
+            self.assertEqual(
+                codex_run.find_thread("Same title", cwd="/somewhere/else"),
+                "right")
+
+    def test_root_match_outranks_recency_within_one_chat(self):
+        """Root is a tie-breaker now, not a gate.
+
+        If one chat somehow has two live threads, the one belonging to the
+        directory in hand wins even when the other was touched more recently
+        ("wrong" is updatedAt 20 against "right" at 10).
+        """
+        registry = {"threads": {
+            "wrong": {"root": "/somewhere/else", "name": "project",
+                      "chat": "Same title", "chat_id": "local-right"},
+            "right": {"root": self.cwd, "name": "project",
+                      "chat": "Same title", "chat_id": "local-right"},
+        }, "roots": {}}
+        with mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-right", "Same title")), \
+             mock.patch.object(codex_run, "_registry", return_value=registry), \
+             mock.patch.object(codex_run, "rpc",
+                               return_value={"data": self.live}):
+            self.assertEqual(codex_run.find_thread("Same title"), "right")
+
     def test_legacy_title_binding_remains_resolvable(self):
         registry = {"threads": {
             "right": {"root": self.cwd, "name": "project",
