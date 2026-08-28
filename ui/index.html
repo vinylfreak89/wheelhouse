@@ -405,6 +405,17 @@ const UIContracts=Object.freeze({
     // but an approval-paused turn must not make them impossible to choose.
     for(const control of turnControls) control.disabled=false;
   },
+  tailThreshold:160,
+  nearTail(pane,threshold=this.tailThreshold){
+    return pane.scrollHeight-pane.scrollTop-pane.clientHeight<=threshold;
+  },
+  mutatePreservingTail(pane,mutate,threshold=this.tailThreshold){
+    const follow=this.nearTail(pane,threshold);
+    const previousTop=pane.scrollTop;
+    const result=mutate();
+    pane.scrollTop=follow?pane.scrollHeight:previousTop;
+    return result;
+  },
   rateLimitBuckets(result){
     const byId=result&&result.rateLimitsByLimitId;
     if(byId&&typeof byId==="object"){
@@ -616,7 +627,7 @@ function add(cls,who,text,ts){
   return b;
 }
 let replaying=false;
-function atBottom(){ return logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight < 60; }
+function atBottom(){ return UIContracts.nearTail(logEl); }
 function setBusy(b){
   busy=b;
   UIContracts.applyBusyState({busy:b,hasThread:Boolean(cur),send:$("#send"),
@@ -646,10 +657,13 @@ function renderItem(it,ts){
     // item/started then item/completed arrive for the SAME item -- update in
     // place instead of appending a second block.
     if(key&&itemEls[key]){
-      const who2="command"+(st!==undefined&&st!==null?" \u00b7 "+st:"");
-      itemEls[key].querySelector(".body").textContent=text;
-      itemEls[key].querySelector(".who span").textContent=who2;
-      return itemEls[key].querySelector(".body");
+      const item=itemEls[key], body=item.querySelector(".body");
+      return UIContracts.mutatePreservingTail(logEl,()=>{
+        const who2="command"+(st!==undefined&&st!==null?" \u00b7 "+st:"");
+        body.textContent=text;
+        item.querySelector(".who span").textContent=who2;
+        return body;
+      });
     }
     const stick=atBottom();
     const b=add("cmd","command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts);
@@ -1628,8 +1642,11 @@ function approval(id,method,params){
   // NOT logEl: switching threads does logEl.innerHTML="" which destroyed the
   // element while the app-server was still waiting for an answer -- an approval
   // that can never be given, and a turn stuck forever. Render outside the log.
-  ($("#approvals")||logEl).append(d);
-  d.scrollIntoView({block:"nearest"});
+  // The approval tray sits above the transcript and changes its viewport
+  // height. Preserve tail-follow when the reader was following, but never let
+  // a new prompt yank somebody who deliberately scrolled up.
+  UIContracts.mutatePreservingTail(logEl,()=>
+    ($("#approvals")||logEl).append(d));
 }
 
 /* ---------- reconcile ----------
@@ -1763,8 +1780,14 @@ es.onmessage=async ev=>{
     const it=p.item||{}; const ty=String(it.type||"");
     if(/subAgent|collabAgent/i.test(ty)) loadAgents();
     if(/^user/i.test(ty)) return;              // already shown when we sent it
-    if(/agentMessage|agent_message/i.test(ty)){ renderMd(streamEl); streamEl=null; }
-    else if(/reasoning/i.test(ty)){ renderMd(reasonEl); reasonEl=null; }
+    if(/agentMessage|agent_message/i.test(ty)){
+      const stick=atBottom(); renderMd(streamEl); streamEl=null;
+      if(stick) logEl.scrollTop=logEl.scrollHeight;
+    }
+    else if(/reasoning/i.test(ty)){
+      const stick=atBottom(); renderMd(reasonEl); reasonEl=null;
+      if(stick) logEl.scrollTop=logEl.scrollHeight;
+    }
     else renderItem(it);
   }
   else if(/^thread\/(started|created|archived|unarchived|deleted|closed|status\/changed|name|queue\/changed)/.test(meth||"")){

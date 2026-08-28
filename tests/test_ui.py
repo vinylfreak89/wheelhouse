@@ -242,6 +242,15 @@ class UiStaticTests(unittest.TestCase):
         self.assertGreaterEqual(len(writes), 4)
         self.assertTrue(all(line.startswith("if(stick)") for line in writes), writes)
 
+    def test_large_command_updates_and_approvals_preserve_scroll_intent(self):
+        command = self.html.split("if(key&&itemEls[key])", 1)[1].split(
+            "const stick=atBottom()", 1)[0]
+        self.assertIn("UIContracts.mutatePreservingTail(logEl", command)
+        approval = self.html.split("function approval(", 1)[1].split(
+            "/* ---------- reconcile", 1)[0]
+        self.assertIn("UIContracts.mutatePreservingTail(logEl", approval)
+        self.assertNotIn("scrollIntoView", approval)
+
     def test_node_contract_suite(self):
         result = subprocess.run(
             ["node", "--test", "tests/ui_contracts.test.js"],

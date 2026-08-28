@@ -170,6 +170,29 @@ test("an approval-paused turn leaves next-turn controls selectable", () => {
   assert.equal(approval.value, "on-request");
 });
 
+test("tail following tolerates normal near-bottom displacement", () => {
+  assert.equal(contracts.nearTail({
+    scrollHeight: 1000, scrollTop: 700, clientHeight: 200,
+  }), true);
+  assert.equal(contracts.nearTail({
+    scrollHeight: 1000, scrollTop: 500, clientHeight: 200,
+  }), false);
+});
+
+test("large item updates follow the tail without snapping a reader who scrolled up", () => {
+  const following = {scrollHeight: 1000, scrollTop: 740, clientHeight: 200};
+  contracts.mutatePreservingTail(following, () => {
+    following.scrollHeight = 1600;
+  });
+  assert.equal(following.scrollTop, 1600);
+
+  const reading = {scrollHeight: 1000, scrollTop: 420, clientHeight: 200};
+  contracts.mutatePreservingTail(reading, () => {
+    reading.scrollHeight = 1600;
+  });
+  assert.equal(reading.scrollTop, 420);
+});
+
 test("multi-bucket usage keeps model-specific limits", () => {
   const buckets = contracts.rateLimitBuckets({
     rateLimits: {limitId: "codex", primary: {usedPercent: 1}},
