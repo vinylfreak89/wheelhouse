@@ -21,15 +21,8 @@ the user watches in the window while Claude drives, and either can type.
                            ├─→ bridge.py 127.0.0.1:8770 ─→ codex app-server
     Claude (curl /rpc)  ───┘
 
+Project: `~/Documents/codex-app` — `README.md` for usage, `INCIDENTS.md` for
 every trade-off and the upstream bugs that forced them.
-
-> **Editorial note — unresolved, left verbatim.** The line above is a sentence
-> fragment: its subject was lost before the skill's first commit (`caf0b98`), so
-> there is no earlier revision to restore it from. The evident referent is the
-> repo's `DECISIONS.md`, whose own header promises to record every unilateral
-> choice with its reasoning — but `DECISIONS.md` is gitignored as the owner's
-> internal worklog, so naming it in a published skill would dangle for anyone
-> else. Repairing it is a human's call, not a refactor's.
 
 ---
 
