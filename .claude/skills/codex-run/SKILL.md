@@ -26,7 +26,10 @@ background**:
 | `./ORCHESTRATION.md` | the reasoning for two-agent work: why blindness fails when merely instructed, why prespecification is the point | you are designing an experiment or a spec-and-results exchange |
 | `./PROTOCOL.md` | architecture, the raw JSON-RPC method table, thread/project resolution internals | the CLI has no subcommand for what you need, or you are changing the bridge |
 
-`LOCAL.md`, if present, is **not optional** — see the next section.
+The table above is on-demand. `LOCAL.md` is NOT: if it exists beside this
+file it is mandatory and must be read completely before acting — see the
+next section. An index that lists only the optional companions hides the
+one companion that is not optional.
 
 ## Load the local overlay first
 
@@ -64,7 +67,11 @@ shape without carrying anyone's local policy.
 
     <repo>/bin/codex-run
 
-**Always drive Codex through this.** Every subcommand preflights the GUI and
+**Always drive Codex through this.** The one exception is environmental, not
+discretionary: with no app bundle present, or under `CODEX_HEADLESS=1`, the
+CLI runs `bridge.py` itself and works with no window at all. That is the CLI
+choosing headless for you — it is still not a licence to start `bridge.py`
+by hand. Every subcommand preflights the GUI and
 bridge for you. Starting `bridge.py` directly also "works" and is WRONG — it
 leaves the user with no window to watch, which is the entire point of this
 setup.
@@ -123,12 +130,17 @@ side might have the tree open.
 Both halves of the loop run in the background, and both need a hook:
 
     # Codex: wait for the turn, then surface the artifact it wrote
-    i=0; while [ "$(codex-run busy "$TID" | awk '{print $1}')" != "idle" ] \
-                && [ "$i" -lt 60 ]; do sleep 30; i=$((i+1)); done
+    i=0; while codex-run watch "$TID" 30 | grep -q "still running" \
+                && [ "$i" -lt 60 ]; do i=$((i+1)); done
 
     # your own long runs: wait on the PROCESS, not a fixed sleep
     i=0; while pgrep -f myrun.py >/dev/null && [ "$i" -lt 240 ]; do
            sleep 60; i=$((i+1)); done
+
+**`codex-run busy` is account-GLOBAL and ignores any thread id you pass it.**
+It lists every active thread and prints `idle` only when the whole account
+is idle, so `busy "$TID"` waits on other people's turns as well as yours.
+Use `watch "$TID"` when you mean one thread.
 
 Launch those with Bash `run_in_background: true` so their exit fires a task
 notification. Both forms cap their iterations: an unbounded wait on a job that

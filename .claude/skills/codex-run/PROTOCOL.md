@@ -66,7 +66,9 @@ Core flow: `thread/start` → `thread/name/set` → `turn/start` → watch `/eve
 | live stream | `GET /events` (SSE) |
 
 Threads are named after the driving chat (see above). There is **no project
-API** — the sidebar groups by `cwd`, so set `cwd` to the project directory.
+API**. The sidebar groups on the pin in `<repo>/state/projects.json`, NOT on
+`cwd` — see "Where the project pin lives" below. Set `cwd` for the sandbox
+scope; it no longer determines grouping.
 
 The gotchas that bite hardest here — `result.data`, the per-request-type
 approval vocabulary, `turn/interrupt` needing `turnId`, the status enum — are in
@@ -93,8 +95,8 @@ know which conversation spawned it.
 `find_thread` resolves through the registry's **chat** binding rather than the
 thread's display name, which is why a rename is safe at any time.
 
-No `[project]` prefix: the sidebar already groups by `cwd`, so the prefix is
-redundant.
+No `[project]` prefix: the sidebar already groups by the project pin, so the
+prefix is redundant.
 
 **Where the project pin lives.** A thread's project is pinned in
 `<repo>/state/projects.json`. The bridge serves that at `/projects`, and the
