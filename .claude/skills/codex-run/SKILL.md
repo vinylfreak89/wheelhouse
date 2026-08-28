@@ -5,6 +5,54 @@ description: Hand work to OpenAI Codex from Claude and watch it run in the Wheel
 
 # Running work on Codex
 
+> **Audience: the external orchestrator driving Codex — not Codex itself.**
+> A Codex agent handed this file must NOT invoke `codex-run`, start or manage
+> the bridge/app-server, or wait on its own turn. Those are the orchestrator's
+> job, and doing them from inside a turn is self-invocation against the bridge
+> that owns your own app-server. The methodology here — structural blindness,
+> prespecification, output contracts, cwd and write scoping — does apply to you.
+> See "Skill roots" for why this skill is deliberately not registered for Codex.
+
+## Every rule, in one place
+
+If you read nothing else, read this. Each line is a rule; the section named
+after it holds the detail.
+
+1. **Read `LOCAL.md` completely if it exists** — mandatory, more specific than
+   this file, never copied into a dispatch. *(Load the local overlay first)*
+2. **Obey the Hard rules** — 0 through 6, no exceptions. *(Hard rules)*
+3. **Drive through `bin/codex-run`.** Never start `bridge.py` by hand.
+   *(Use the CLI)*
+4. **Take the tree lock before writing a shared checkout**, release after. A
+   held lock is a hard stop, not a hint. *(Take the tree lock)*
+5. **Hook every dispatch before moving on.** Use `watch "$TID"`, never
+   `busy "$TID"` — `busy` is account-global. *(Never leave work unhooked)*
+6. **Do not restate what `AGENTS.md` already gives Codex.** *(Do NOT restate)*
+7. **Every dispatch carries entrypoint, inputs, preconditions, output
+   contract.** *(Orchestrating well)*
+8. **Ask for status, counts and verbatim errors — never content — from a run
+   you must not read.** *(Getting facts out of a run you must not read)*
+9. **Codex cannot wait for anything.** Continuation is yours. *(Codex cannot
+   wait)*
+10. **Pass `--cwd` whenever the work writes outside the thread's directory.**
+    Reads are not scoped; writes are. *(Writes are scoped)*
+11. **Thread names are cosmetic; resolution is by chat id.** Renaming is safe.
+    *(Thread names are cosmetic)*
+12. **Turns inherit the thread's settings.** Override only deliberately, and
+    match the tier to the work. *(Effort is a budget decision)*
+13. **Never restart while a turn is running.** `reload` for UI changes.
+    *(Restarting the app kills running turns)*
+14. **This skill is deliberately not a registered Codex skill root.**
+    *(Skill roots)*
+15. **Raw protocol only when the CLI has no subcommand.** *(Raw protocol)*
+
+Two more are mandatory ONLY in their modes, and are the last two sections:
+
+16. **Blindness must be STRUCTURAL, never instructed** — before any independent
+    derivation compared against a reference.
+17. **The spec-and-results loop** — before any exchange where Codex designs and
+    you execute.
+
 ## What to read, and when
 
 **This file carries every rule. Nothing you are required to obey lives anywhere
