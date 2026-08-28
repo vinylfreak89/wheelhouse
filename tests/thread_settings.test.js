@@ -106,11 +106,6 @@ const MODELS = [
 const CATALOG_OPTIONS = MODELS
   .map(m => `<option value="${m.id}">${m.displayName}</option>`).join("");
 
-const SANDBOX = JSON.stringify({
-  type: "workspaceWrite", network: "off",
-  file_system: {type: "restricted", entries: [{access: "write"}]},
-});
-
 function sandboxFor(name) {
   return JSON.stringify({
     type: "workspaceWrite", network: name,
