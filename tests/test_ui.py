@@ -10,6 +10,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 UI = REPO / "ui" / "index.html"
 BRIDGE = REPO / "bridge.py"
+NATIVE = REPO / "native" / "main.swift"
 
 
 class IdCollector(HTMLParser):
@@ -28,6 +29,7 @@ class UiStaticTests(unittest.TestCase):
     def setUpClass(cls):
         cls.html = UI.read_text(encoding="utf-8")
         cls.bridge = BRIDGE.read_text(encoding="utf-8")
+        cls.native = NATIVE.read_text(encoding="utf-8")
 
     def test_html_ids_are_unique_and_literal_id_selectors_exist(self):
         parser = IdCollector()
@@ -137,6 +139,18 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn('id="cCwd"', self.html)
         self.assertIn('mk("Working directory…"', self.html)
         self.assertIn("p.threadSettings.cwd", self.html)
+
+    def test_command_f_opens_conversation_find_and_full_screen_keeps_native_shortcut(self):
+        self.assertIn('id="findbar"', self.html)
+        self.assertIn("window.openFind=", self.html)
+        self.assertIn("window.findNext=", self.html)
+        self.assertIn('messageHandlers.find', self.html)
+        self.assertIn('withTitle: "Find…"', self.native)
+        self.assertIn('#selector(showFind)', self.native)
+        self.assertIn('cfg.userContentController.add(self, name: "find")', self.native)
+        self.assertIn('configuration.wraps = true', self.native)
+        self.assertIn('fullScreen.keyEquivalentModifierMask = [.command, .control]',
+                      self.native)
 
     def test_usage_renders_all_rate_limit_buckets_and_visible_errors(self):
         body = self.html.split("async function loadUsage", 1)[1].split(

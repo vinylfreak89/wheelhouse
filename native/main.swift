@@ -27,7 +27,8 @@ let BRIDGE: String = {
     return tries.first(where: { fm.fileExists(atPath: $0) }) ?? tries.last!
 }()
 
-final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
+                      WKScriptMessageHandler {
     var window: NSWindow!
     var web: WKWebView!
     var bridge: Process?
@@ -68,11 +69,17 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Find…", action: #selector(showFind), keyEquivalent: "f")
+        editMenu.addItem(withTitle: "Find Next", action: #selector(findNext), keyEquivalent: "g")
+        let findPreviousItem = editMenu.addItem(withTitle: "Find Previous", action: #selector(findPrevious), keyEquivalent: "g")
+        findPreviousItem.keyEquivalentModifierMask = [.command, .shift]
         editItem.submenu = editMenu
 
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        let fullScreen = viewMenu.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.command, .control]
         viewItem.submenu = viewMenu
 
         let winItem = NSMenuItem(); main.addItem(winItem)
@@ -87,6 +94,9 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
 
     @objc func newThread() { web.evaluateJavaScript("window.openNewThread && window.openNewThread()") }
     @objc func reload()    { web.reload() }
+    @objc func showFind()  { web.evaluateJavaScript("window.openFind && window.openFind()") }
+    @objc func findNext()  { web.evaluateJavaScript("window.findNext && window.findNext(false)") }
+    @objc func findPrevious() { web.evaluateJavaScript("window.findNext && window.findNext(true)") }
 
     // MARK: lifecycle
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -103,6 +113,7 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
 
         let cfg = WKWebViewConfiguration()
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
+        cfg.userContentController.add(self, name: "find")
         web = WKWebView(frame: rect, configuration: cfg)
         web.navigationDelegate = self
         web.uiDelegate = self
@@ -114,6 +125,26 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
 
         startBridge()
         waitThenLoad(0)
+    }
+
+    func userContentController(_ controller: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "find",
+              let payload = message.body as? [String: Any],
+              let query = payload["query"] as? String else { return }
+        if query.isEmpty {
+            web.evaluateJavaScript("window.getSelection().removeAllRanges()")
+            return
+        }
+        let configuration = WKFindConfiguration()
+        configuration.backwards = payload["backwards"] as? Bool ?? false
+        configuration.caseSensitive = false
+        configuration.wraps = true
+        web.find(query, configuration: configuration) { [weak self] result in
+            let found = result.matchFound ? "true" : "false"
+            self?.web.evaluateJavaScript(
+                "window.updateFindResult && window.updateFindResult(\(found))")
+        }
     }
 
     func startBridge() {

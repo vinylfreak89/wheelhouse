@@ -81,6 +81,20 @@ button{font:inherit}
 #usage .cred.covering span{color:var(--warn)}
 #usage .note{color:var(--dim2);margin-top:4px;font-size:10.5px}
 
+/* ---------- find ---------- */
+#findbar{display:none;position:fixed;z-index:30;top:50px;right:18px;align-items:center;
+  gap:5px;padding:7px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;box-shadow:0 8px 28px #0008}
+#findbar.on{display:flex}
+#findbar input{width:260px;background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;color:var(--fg);font:12px var(--mono);padding:6px 8px;outline:none}
+#findbar input:focus{border-color:var(--accent)}
+#findbar input.miss{border-color:var(--err)}
+#findbar button{width:27px;height:27px;padding:0;border:1px solid var(--line);
+  border-radius:6px;background:var(--panel);color:var(--dim);cursor:pointer}
+#findbar button:hover{border-color:var(--accent);color:var(--fg)}
+#findstatus{min-width:62px;color:var(--dim2);font-size:10.5px;text-align:right}
+
 /* ---------- main ---------- */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
 #bar{padding:0 14px;height:44px;flex:0 0 44px;border-bottom:1px solid var(--line);
@@ -281,6 +295,15 @@ select.mini:focus{outline:none;border-color:var(--accent)}
   <div id="wlog"></div>
 </div>
 
+<div id="findbar" role="search" aria-label="Find in conversation">
+  <input id="findinp" type="search" autocomplete="off" spellcheck="false"
+         aria-label="Find text">
+  <span id="findstatus" role="status"></span>
+  <button id="findprev" title="Previous match (Shift-Command-G)">↑</button>
+  <button id="findnext" title="Next match (Command-G)">↓</button>
+  <button id="findclose" title="Close (Escape)">×</button>
+</div>
+
 <div id="mask"><div id="modal">
   <h2>New thread</h2>
   <div class="f"><label>Name</label><input id="mName" placeholder="[project] what this is for"></div>
@@ -423,6 +446,49 @@ async function activeTurnId(){
 let threads=[], tab="projects", models=[], wirePaused=false;
 const cwdCache={};
 let DEFAULT_CWD="";        /* supplied by the bridge; see loadProjects */
+
+/* ---------- find ---------- */
+function requestFind(backwards=false){
+  const query=$("#findinp").value;
+  $("#findstatus").textContent=query?"":"type to find";
+  $("#findinp").classList.remove("miss");
+  const handler=window.webkit&&window.webkit.messageHandlers&&
+    window.webkit.messageHandlers.find;
+  if(handler) handler.postMessage({query,backwards});
+  else if(query) window.updateFindResult(window.find(query,false,backwards,true));
+}
+window.openFind=()=>{
+  const bar=$("#findbar"), input=$("#findinp");
+  bar.classList.add("on");
+  const selected=String(window.getSelection&&window.getSelection()||"").trim();
+  if(selected&&!input.value) input.value=selected;
+  input.focus(); input.select();
+  if(input.value) requestFind(false);
+};
+window.findNext=backwards=>{
+  if(!$("#findbar").classList.contains("on")) window.openFind();
+  if($("#findinp").value) requestFind(Boolean(backwards));
+};
+window.updateFindResult=found=>{
+  const hasQuery=Boolean($("#findinp").value);
+  $("#findinp").classList.toggle("miss",hasQuery&&!found);
+  $("#findstatus").textContent=hasQuery?(found?"match":"no matches"):"type to find";
+};
+function closeFind(){
+  $("#findbar").classList.remove("on");
+  $("#findstatus").textContent="";
+  const handler=window.webkit&&window.webkit.messageHandlers&&
+    window.webkit.messageHandlers.find;
+  if(handler) handler.postMessage({query:"",backwards:false});
+}
+$("#findinp").oninput=()=>requestFind(false);
+$("#findinp").onkeydown=e=>{
+  if(e.key==="Escape"){ e.preventDefault(); closeFind(); }
+  else if(e.key==="Enter"){ e.preventDefault(); requestFind(e.shiftKey); }
+};
+$("#findprev").onclick=()=>requestFind(true);
+$("#findnext").onclick=()=>requestFind(false);
+$("#findclose").onclick=closeFind;
 
 async function rpc(method,params,timeout){
   try{
