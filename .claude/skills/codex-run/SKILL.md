@@ -135,7 +135,8 @@ notification. Both forms cap their iterations: an unbounded wait on a job that
 died silently hangs until the turn ends.
 
 Prefer ONE hook covering several jobs when they are serialised behind each
-other. `codex-run on-file <path> <id> <taskfile>` is the stronger form when the
+other -- one notification when the queue drains beats four interleaved ones.
+`codex-run on-file <path> <id> <taskfile>` is the stronger form when the
 next step is itself a dispatch: it waits for a file to appear AND stop changing,
 waits out any active turn, then sends the follow-up without you in the loop.
 
@@ -346,7 +347,7 @@ Mirror how Claude runs it: resume, then step in order, one sub-agent per stage.
    itself (e.g. `--stage` choices in `--help`), never from memory.
 3. **Per stage:** `bootstrap` the prompt → spawn a sub-agent to answer it →
    `submit` the reply. Do not answer bootstrap prompts inline if the tool
-   expects an isolated agent.
+   expects an isolated agent; isolation is usually the point.
 4. **Stop on the first stage error** and report which stage and the verbatim
    tool error. Do not skip ahead.
 
