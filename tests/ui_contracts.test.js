@@ -87,6 +87,7 @@ test("turn/start includes every selected override", () => {
     model: "gpt-test",
     effort: "high",
     approvalPolicy: "on-request",
+    approvalsReviewer: "user",
     serviceTier: "priority",
   });
 });
@@ -112,6 +113,7 @@ test("thread/start maps modal controls to the protocol shape", () => {
     cwd: "/work/project",
     sandbox: "workspace-write",
     approvalPolicy: "untrusted",
+    approvalsReviewer: "user",
     threadSource: "user",
     model: "gpt-test",
     config: {model_reasoning_effort: "xhigh"},
@@ -122,6 +124,23 @@ test("thread settings persist an explicit working directory", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(contracts.threadSettings({
     threadId: "thread-1", cwd: "  /work/other-repo  ",
   }))), {threadId: "thread-1", cwd: "/work/other-repo"});
+});
+
+test("auto-review keeps on-request policy while delegating its decisions", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.autonomySettings({
+    threadId: "thread-1", mode: "auto-review",
+  }))), {
+    threadId: "thread-1",
+    approvalPolicy: "on-request",
+    approvalsReviewer: "auto_review",
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.autonomySettings({
+    threadId: "thread-1", mode: "never",
+  }))), {
+    threadId: "thread-1",
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+  });
 });
 
 test("effective metadata refresh is bounded and ignores a departed thread", () => {

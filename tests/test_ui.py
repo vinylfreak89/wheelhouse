@@ -140,6 +140,14 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn('mk("Working directory…"', self.html)
         self.assertIn("p.threadSettings.cwd", self.html)
 
+    def test_active_thread_can_route_approvals_to_auto_review(self):
+        self.assertIn('id="cAppr"', self.html)
+        self.assertIn('mk("Approval routing…"', self.html)
+        self.assertIn('approvalsReviewer:"auto_review"', self.html)
+        self.assertIn('rpc("thread/settings/update",payload,30)', self.html)
+        self.assertIn("opened.approvalsReviewer", self.html)
+        self.assertIn("p.threadSettings.approvalsReviewer", self.html)
+
     def test_command_f_opens_conversation_find_and_full_screen_keeps_native_shortcut(self):
         self.assertIn('id="findbar"', self.html)
         self.assertIn("window.openFind=", self.html)

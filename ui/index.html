@@ -248,7 +248,7 @@ select.mini:focus{outline:none;border-color:var(--accent)}
     <b id="title">No thread</b>
     <span class="chip" id="cModel" style="display:none"></span>
     <span class="chip" id="cEff" style="display:none"></span>
-    <span class="chip" id="cAppr" style="display:none"></span>
+    <button class="chip" id="cAppr" style="display:none" title="Change approval routing"></button>
     <span class="chip" id="cSbx" style="display:none"></span>
     <button class="chip" id="cCwd" style="display:none" title="Change working directory"></button>
     <span class="chip" id="cTok" style="display:none"></span>
@@ -269,6 +269,7 @@ select.mini:focus{outline:none;border-color:var(--accent)}
       <select class="mini" id="selTier" title="service tier"></select>
       <select class="mini" id="selAppr" title="approval policy for this turn">
         <option value="">approvals: thread default</option>
+        <option value="auto-review">auto-review</option>
         <option value="never">never</option>
         <option value="on-request">on-request</option>
         <option value="untrusted">untrusted</option>
@@ -319,6 +320,7 @@ select.mini:focus{outline:none;border-color:var(--accent)}
       <option value="danger-full-access">danger-full-access</option></select></div>
     <div class="f"><label>Approvals</label><select id="mAppr">
       <option value="never">never (auto)</option>
+      <option value="auto-review">auto-review</option>
       <option value="on-request">on-request</option>
       <option value="untrusted">untrusted</option></select></div>
   </div>
@@ -374,7 +376,8 @@ const UIContracts=Object.freeze({
   },
   threadStart({cwd,defaultCwd,sandbox,approvalPolicy,model,effort}){
     const p={cwd:String(cwd||"").trim()||defaultCwd,
-             sandbox,approvalPolicy,threadSource:"user"};
+             sandbox,threadSource:"user"};
+    Object.assign(p,this.approvalOverrides(approvalPolicy));
     if(model) p.model=model;
     if(effort) p.config={model_reasoning_effort:effort};
     return p;
@@ -382,11 +385,20 @@ const UIContracts=Object.freeze({
   threadSettings({threadId,cwd}){
     return {threadId,cwd:String(cwd||"").trim()};
   },
+  approvalOverrides(mode){
+    if(!mode) return {};
+    if(mode==="auto-review")
+      return {approvalPolicy:"on-request",approvalsReviewer:"auto_review"};
+    return {approvalPolicy:mode,approvalsReviewer:"user"};
+  },
+  autonomySettings({threadId,mode}){
+    return Object.assign({threadId},this.approvalOverrides(mode));
+  },
   turnStart({threadId,text,model,effort,approvalPolicy,serviceTier}){
     const p={threadId,input:[{type:"text",text}]};
     if(model) p.model=model;
     if(effort) p.effort=effort;
-    if(approvalPolicy) p.approvalPolicy=approvalPolicy;
+    Object.assign(p,this.approvalOverrides(approvalPolicy));
     if(serviceTier) p.serviceTier=serviceTier;
     return p;
   },
@@ -462,6 +474,7 @@ async function activeTurnId(){
 }
 let threads=[], tab="projects", models=[], wirePaused=false;
 const cwdCache={};
+const reviewerCache={};
 let DEFAULT_CWD="";        /* supplied by the bridge; see loadProjects */
 
 /* ---------- find ---------- */
@@ -758,6 +771,32 @@ async function changeThreadCwd(t){
   cwdCache[t.id]=payload.cwd; t.cwd=payload.cwd;
   if(cur===t.id){ curInfo.cwd=payload.cwd; showCwd(payload.cwd); }
   $("#hint").textContent="working directory updated for subsequent turns";
+}
+async function changeThreadAutonomy(t){
+  if(!t||!t.id) return;
+  let initial="ask";
+  if(reviewerCache[t.id]==="auto_review") initial="auto-review";
+  else if(t.id===cur&&curMeta.approval_mode==="never") initial="never";
+  const selected=await askSelect("Approval routing",[
+    ["auto-review","Auto-review sandbox and network requests"],
+    ["ask","Ask me in Wheelhouse"],
+    ["never","Never ask; return sandbox failures to the agent"],
+  ],initial,"Auto-review keeps the sandbox and delegates approval decisions to a risk-review agent.");
+  if(selected==null) return;
+  const mode=selected==="ask"?"on-request":selected;
+  const payload=UIContracts.autonomySettings({threadId:t.id,mode});
+  const r=await rpc("thread/settings/update",payload,30);
+  if(r.error){ $("#hint").textContent="approval routing update failed: "+
+    String(r.error.message||r.error).slice(0,180); return; }
+  reviewerCache[t.id]=payload.approvalsReviewer;
+  if(t.id===cur){
+    curMeta.approval_mode=payload.approvalPolicy;
+    renderedMetaFingerprint="";
+    loadMeta(t.id);
+  }
+  $("#hint").textContent=selected==="auto-review"
+    ?"approval requests will be reviewed automatically on subsequent turns"
+    :"approval routing updated for subsequent turns";
 }
 const nameCache={};
 /* A thread's PROJECT is pinned by bin/codex-run and served from /projects.
@@ -1105,7 +1144,9 @@ async function loadMeta(id){
     const effDef=(mm&&mm.defaultReasoningEffort)||"";
     chip("#cEff", m.reasoning_effort ? ("effort: "+m.reasoning_effort)
                                      : ("effort: "+(effDef||"default")));
-    chip("#cAppr",  m.approval_mode?("approvals: "+m.approval_mode):null);
+    const reviewer=reviewerCache[id];
+    chip("#cAppr", reviewer==="auto_review"?"approvals: auto-review":
+      (m.approval_mode?("approvals: "+m.approval_mode):null));
     chip("#cSbx",   fmtSandbox(m.sandbox_policy), m.sandbox_policy||"");
     chip("#cTok",   m.tokens_used?(Number(m.tokens_used).toLocaleString()+" tok"):null);
     // reflect EVERY resolved default in the selectors, not just the model
@@ -1127,7 +1168,8 @@ async function loadMeta(id){
     setDefault("#mSbx", $("#mSbx").options[0].value, null);
     if(m.approval_mode){
       const o=$("#selAppr").options[0];
-      if(o&&o.value==="") o.textContent="approvals: thread default ("+m.approval_mode+")";
+      const resolved=reviewer==="auto_review"?"auto-review":m.approval_mode;
+      if(o&&o.value==="") o.textContent="approvals: thread default ("+resolved+")";
     }
   }catch(e){ curMeta={}; }
 }
@@ -1217,6 +1259,7 @@ function threadMenu(t,x,y){
     loadThreads();
   });
   mk("Working directory…",()=>changeThreadCwd(t));
+  mk("Approval routing…",()=>changeThreadAutonomy(t));
   mk("Archive",async()=>{
     const kidsR=await rpc("thread/list",{ancestorThreadId:t.id,limit:50},40);
     const kids=(kidsR.result||{}).data||kidsR.data||[];
@@ -1258,6 +1301,29 @@ function askText(title,initial){
     inp.onkeydown=e=>{ if(e.key==="Enter") fin(inp.value.trim());
                        if(e.key==="Escape") fin(null); };
     setTimeout(()=>{ inp.focus(); inp.select(); },40);
+  });
+}
+function askSelect(title,options,initial,help){
+  return new Promise(res=>{
+    $("#mask").classList.add("on");
+    const box=$("#modal"), prev=box.innerHTML;
+    box.innerHTML=`<h2></h2><div class="f"><label></label><select id="axSel"></select></div>
+      <div id="mbtns"><button id="axC">Cancel</button>
+      <button class="pri" id="axOK">Save</button></div>`;
+    box.querySelector("h2").textContent=title;
+    box.querySelector("label").textContent=help||"";
+    const select=box.querySelector("#axSel");
+    for(const [value,label] of options){
+      const option=document.createElement("option"); option.value=value;
+      option.textContent=label; select.append(option);
+    }
+    select.value=initial;
+    const fin=v=>{ box.innerHTML=prev; $("#mask").classList.remove("on"); bindModal(); res(v); };
+    box.querySelector("#axOK").onclick=()=>fin(select.value);
+    box.querySelector("#axC").onclick=()=>fin(null);
+    select.onkeydown=e=>{ if(e.key==="Enter") fin(select.value);
+                          if(e.key==="Escape") fin(null); };
+    setTimeout(()=>select.focus(),40);
   });
 }
 function askConfirm(msg){
@@ -1314,7 +1380,8 @@ async function open_(id){
   cur=id; streamEl=null; reasonEl=null; curTurn=null;
   renderedMetaFingerprint="";
   const r=await rpc("thread/resume",{threadId:id});
-  const th=(r.result&&r.result.thread)||{};
+  const opened=r.result||{}, th=opened.thread||{};
+  if(opened.approvalsReviewer) reviewerCache[id]=opened.approvalsReviewer;
 
   // Render straight from the rollout JSONL. It is the authoritative record --
   // ordered, timestamped, and complete, including tool calls and their output
@@ -1440,6 +1507,8 @@ $("#selModel").onchange=()=>{ effortOptions($("#selModel").value,"#selEffort",tr
                               tierOptions($("#selModel").value); };
 $("#mModel").onchange=()=>effortOptions($("#mModel").value,"#mEffort",false);
 $("#cCwd").onclick=()=>changeThreadCwd(curInfo&&curInfo.id?curInfo:
+  threads.find(t=>t.id===cur));
+$("#cAppr").onclick=()=>changeThreadAutonomy(curInfo&&curInfo.id?curInfo:
   threads.find(t=>t.id===cur));
 $("#wireBtn").onclick=()=>{ $("#wire").classList.toggle("on");
   $("#wireBtn").classList.toggle("on",$("#wire").classList.contains("on")); };
@@ -1830,10 +1899,15 @@ es.onmessage=async ev=>{
     if(cur) setTimeout(()=>reconcile(),100);
   }
   else if(meth==="thread/settings/updated"||meth==="thread/tokenUsage/updated"){
-    if(meth==="thread/settings/updated"&&p.threadId&&p.threadSettings&&p.threadSettings.cwd){
-      cwdCache[p.threadId]=p.threadSettings.cwd;
-      const thread=threads.find(t=>t.id===p.threadId); if(thread) thread.cwd=p.threadSettings.cwd;
-      if(cur===p.threadId){ curInfo.cwd=p.threadSettings.cwd; showCwd(p.threadSettings.cwd); }
+    if(meth==="thread/settings/updated"&&p.threadId&&p.threadSettings){
+      if(p.threadSettings.cwd){
+        cwdCache[p.threadId]=p.threadSettings.cwd;
+        const thread=threads.find(t=>t.id===p.threadId); if(thread) thread.cwd=p.threadSettings.cwd;
+        if(cur===p.threadId){ curInfo.cwd=p.threadSettings.cwd; showCwd(p.threadSettings.cwd); }
+      }
+      if(p.threadSettings.approvalsReviewer)
+        reviewerCache[p.threadId]=p.threadSettings.approvalsReviewer;
+      if(cur===p.threadId) renderedMetaFingerprint="";
     }
     if(cur) loadMeta(cur);
   }
