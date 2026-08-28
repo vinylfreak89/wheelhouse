@@ -230,7 +230,8 @@ class UiStaticTests(unittest.TestCase):
         resolved = events.index('if(meth==="serverRequest/resolved")')
         expiry = events.index("expireApprovals(p.threadId")
         agent_filter = events.index("if(p.threadId&&agentCur")
-        current_filter = events.index("if(p.threadId&&cur&&p.threadId!==cur)")
+        current_filter = events.index(
+            "const threadRoute=UIContracts.threadEventRoute")
         self.assertLess(resolved, agent_filter)
         self.assertLess(expiry, agent_filter)
         self.assertLess(resolved, current_filter)
@@ -246,6 +247,22 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("renderTranscript(rows", reconcile)
         self.assertIn("if(busy) return", reconcile)
         self.assertNotIn("open_(cur)", reconcile)
+
+    def test_hot_reload_restores_thread_before_accepting_its_live_events(self):
+        self.assertIn('const ACTIVE_THREAD_KEY="wheelhouse.activeThread"', self.html)
+        opened = self.html.split("async function open_(id)", 1)[1].split(
+            "/* ---------- new thread", 1)[0]
+        self.assertIn("threadViewReady=false", opened)
+        self.assertIn("rememberThreadId(id)", opened)
+        self.assertIn("threadViewReady=true", opened)
+        boot = self.html.split("/* ---------- boot ---------- */", 1)[1]
+        self.assertIn("const restoreThread=rememberedThreadId()", boot)
+        self.assertIn("if(restoreThread) await open_(restoreThread)", boot)
+        events = self.html.split("es.onmessage=async ev=>", 1)[1]
+        route = events.index("UIContracts.threadEventRoute")
+        delta = events.index('meth==="item/agentMessage/delta"', route)
+        self.assertLess(route, delta)
+        self.assertIn('threadRoute==="not-ready"||threadRoute==="other"', events)
 
     def test_removed_transcript_cache_hook_is_not_called(self):
         self.assertNotIn("txUpdateLast", self.html)

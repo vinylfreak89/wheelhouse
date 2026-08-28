@@ -212,6 +212,27 @@ test("large item updates follow the tail without snapping a reader who scrolled 
   assert.equal(reading.scrollTop, 420);
 });
 
+test("thread events cannot render before the selected transcript is attached", () => {
+  assert.equal(contracts.threadEventRoute({
+    eventThreadId: "thread-1", currentThreadId: null, viewReady: false,
+  }), "not-ready");
+  assert.equal(contracts.threadEventRoute({
+    eventThreadId: "thread-1", currentThreadId: "thread-1", viewReady: false,
+  }), "not-ready");
+  assert.equal(contracts.threadEventRoute({
+    eventThreadId: "thread-2", currentThreadId: "thread-1", viewReady: true,
+  }), "other");
+  assert.equal(contracts.threadEventRoute({
+    eventThreadId: "thread-1", currentThreadId: "thread-1", viewReady: true,
+  }), "current");
+});
+
+test("reset countdown carries rounded minutes into hours", () => {
+  assert.equal(contracts.resetCountdown(17999, 0), "5h");
+  assert.equal(contracts.resetCountdown(3599, 0), "1h");
+  assert.equal(contracts.resetCountdown(90061, 0), "1d 1h");
+});
+
 test("poll refreshes keep existing thread order and prepend only new threads", () => {
   const previous = [{id: "a", status: "old-a"}, {id: "b", status: "old-b"}];
   const refreshed = [{id: "c"}, {id: "b", status: "new-b"},
@@ -240,6 +261,19 @@ test("multi-bucket usage keeps model-specific limits", () => {
       limitId: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark",
       primary: {usedPercent: 2}, secondary: {usedPercent: 3},
     }},
+  ]);
+});
+
+test("model-specific usage buckets have deterministic order", () => {
+  const buckets = contracts.rateLimitBuckets({
+    rateLimitsByLimitId: {
+      codex_zebra: {limitName: "Zebra"},
+      codex_bengalfox: {limitName: "Bengalfox"},
+      codex: {limitName: "Codex"},
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(buckets.map(bucket => bucket.id))), [
+    "codex", "codex_bengalfox", "codex_zebra",
   ]);
 });
 

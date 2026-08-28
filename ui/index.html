@@ -428,6 +428,23 @@ const UIContracts=Object.freeze({
     pane.scrollTop=follow?pane.scrollHeight:previousTop;
     return result;
   },
+  threadEventRoute({eventThreadId,currentThreadId,viewReady}){
+    if(!eventThreadId) return "global";
+    if(!currentThreadId||!viewReady) return "not-ready";
+    return eventThreadId===currentThreadId?"current":"other";
+  },
+  resetCountdown(resetsAt,nowMs=Date.now()){
+    if(!resetsAt) return "";
+    const remainingMs=resetsAt*1000-nowMs;
+    if(remainingMs<=0) return "now";
+    const totalMinutes=Math.max(1,Math.ceil(remainingMs/60000));
+    const days=Math.floor(totalMinutes/1440);
+    const hours=Math.floor((totalMinutes%1440)/60);
+    const minutes=totalMinutes%60;
+    if(days) return `${days}d${hours?` ${hours}h`:""}`;
+    if(hours) return `${hours}h${minutes?` ${minutes}m`:""}`;
+    return `${minutes}m`;
+  },
   stableById(previous,incoming){
     const next=new Map(incoming.map(item=>[item.id,item]));
     const known=new Set(previous.map(item=>item.id));
@@ -437,7 +454,8 @@ const UIContracts=Object.freeze({
   rateLimitBuckets(result){
     const byId=result&&result.rateLimitsByLimitId;
     if(byId&&typeof byId==="object"){
-      const entries=Object.entries(byId);
+      const entries=Object.entries(byId).sort(([a],[b])=>
+        a==="codex"?-1:b==="codex"?1:String(a).localeCompare(String(b)));
       if(entries.length) return entries.map(([id,snapshot])=>({
         id,name:(snapshot&&snapshot.limitName)||(id==="codex"?"Codex":id),
         snapshot:snapshot||{}
@@ -456,6 +474,17 @@ const logEl=$("#log"), listEl=$("#list"), wlogEl=$("#wlog");
 let logTarget=logEl;              // detached while rebuilding a transcript
 let cur=null, curInfo={}, busy=false, streamEl=null, reasonEl=null;
 let curTurn=null;                 // active turn id: turn/steer and turn/interrupt both need it
+let threadViewReady=false;        // false while a selected thread is being restored/opened
+const ACTIVE_THREAD_KEY="wheelhouse.activeThread";
+function rememberedThreadId(){
+  try{ return sessionStorage.getItem(ACTIVE_THREAD_KEY)||""; }catch(e){ return ""; }
+}
+function rememberThreadId(id){
+  try{
+    if(id) sessionStorage.setItem(ACTIVE_THREAD_KEY,id);
+    else sessionStorage.removeItem(ACTIVE_THREAD_KEY);
+  }catch(e){}
+}
 
 /* curTurn is only ever set by a live turn/started event, so it is null whenever
    the turn began while this view was not listening: switching to a thread that
@@ -1000,7 +1029,8 @@ function row(t, labelOverride){
       await rpc("thread/delete",{threadId:k.id});
     }
     await rpc("thread/delete",{threadId:t.id});
-    if(cur===t.id){ cur=null; logEl.innerHTML=""; $("#title").textContent="No thread"; setBusy(false); }
+    if(cur===t.id){ cur=null; threadViewReady=true; rememberThreadId("");
+      logEl.innerHTML=""; $("#title").textContent="No thread"; setBusy(false); }
     loadThreads(); loadAgents();
   });
   d.append(st,nm,acts); d.title=t.id;
@@ -1047,11 +1077,7 @@ function human(mins){
   return mins+"m";
 }
 function until(ts){
-  if(!ts) return "";
-  const s=ts*1000-Date.now();
-  if(s<=0) return "now";
-  const h=Math.floor(s/3.6e6), m=Math.round((s%3.6e6)/6e4);
-  return h>=24?`${Math.floor(h/24)}d ${h%24}h`:(h?`${h}h ${m}m`:`${m}m`);
+  return UIContracts.resetCountdown(ts);
 }
 function bar(name,w){
   if(!w) return "";
@@ -1272,7 +1298,8 @@ function threadMenu(t,x,y){
       "Delete this thread AND its transcript? Archive keeps the trail instead.");
     if(!ok) return;
     await rpc("thread/delete",{threadId:t.id});
-    if(cur===t.id){ cur=null; logEl.innerHTML=""; $("#title").textContent="No thread";
+    if(cur===t.id){ cur=null; threadViewReady=true; rememberThreadId("");
+      logEl.innerHTML=""; $("#title").textContent="No thread";
                     ["#cModel","#cEff","#cAppr","#cSbx","#cTok"]
                       .forEach(x=>$(x).style.display="none");
                     setBusy(false); }
@@ -1377,9 +1404,17 @@ function renderTranscript(rows,{atEnd=true,scrollTop=0}={}){
 let openGeneration=0;
 async function open_(id){
   const generation=++openGeneration;
+  threadViewReady=false;
   cur=id; streamEl=null; reasonEl=null; curTurn=null;
+  rememberThreadId(id);
   renderedMetaFingerprint="";
   const r=await rpc("thread/resume",{threadId:id});
+  if(generation!==openGeneration||cur!==id) return false;
+  if(r.error||!r.result){
+    cur=null; curInfo={}; threadViewReady=true; rememberThreadId("");
+    logEl.innerHTML=""; $("#title").textContent="No thread"; setBusy(false);
+    renderList(); return false;
+  }
   const opened=r.result||{}, th=opened.thread||{};
   if(opened.approvalsReviewer) reviewerCache[id]=opened.approvalsReviewer;
 
@@ -1402,8 +1437,20 @@ async function open_(id){
   loadMeta(id);
   renderTranscript(rows);
 
+  threadViewReady=true;
   setBusy(((th.status||{}).type)==="active");
   renderList(); loadAgents();
+  // A completion can land while the transcript snapshot is loading and its
+  // live event is intentionally suppressed. Re-read status once the view is
+  // attached, then reconcile any final item the snapshot narrowly missed.
+  rpc("thread/read",{threadId:id},30).then(latest=>{
+    if(cur!==id||!threadViewReady||latest.error) return;
+    const current=((latest.result||{}).thread)||{};
+    const active=((current.status||{}).type)==="active";
+    setBusy(active);
+    if(!active) reconcile();
+  }).catch(()=>{});
+  return true;
 }
 let renderedFromRollout=0;
 
@@ -1835,7 +1882,9 @@ es.onmessage=async ev=>{
     } else if(meth==="turn/completed"||meth==="turn/failed"){ aStream=null; }
     return;
   }
-  if(p.threadId&&cur&&p.threadId!==cur){
+  const threadRoute=UIContracts.threadEventRoute({eventThreadId:p.threadId,
+    currentThreadId:cur,viewReady:threadViewReady});
+  if(threadRoute==="not-ready"||threadRoute==="other"){
     if(/^(turn\/(completed|failed|started)|thread\/(status|project|queue|closed|archived|unarchived|deleted))/.test(meth||""))
       loadThreads();
     return;
@@ -1953,7 +2002,10 @@ es.onmessage=async ev=>{
   effortOptions("", "#selEffort", true, "");
   effortOptions("", "#mEffort", false, "");
   tierOptions("");
+  const restoreThread=rememberedThreadId();
   await loadThreads();
+  if(restoreThread) await open_(restoreThread);
+  else threadViewReady=true;
   loadAgents();
   loadUsage();
   setInterval(()=>{ if(!document.hidden) loadUsage(); },120000);
