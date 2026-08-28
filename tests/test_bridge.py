@@ -97,6 +97,54 @@ class HandlerContractTests(unittest.TestCase):
             "result": {"method": "thread/list"},
         })
 
+    def test_rpc_rejects_an_unlaunchable_working_directory(self):
+        for method in ("thread/start", "thread/settings/update", "turn/start"):
+            with self.subTest(method=method):
+                payload = json.dumps({
+                    "method": method,
+                    "params": {"threadId": "thread-1", "cwd": "/missing/wheelhouse-cwd"},
+                }).encode()
+                request, sent = handler("/rpc", payload)
+                request.do_POST()
+                self.assertEqual(sent[0][0], 200)
+                self.assertEqual(json.loads(sent[0][1]), {
+                    "error": {
+                        "code": -32602,
+                        "message": ("working directory does not exist or is not a directory: "
+                                    "/missing/wheelhouse-cwd"),
+                    },
+                })
+        self.assertEqual(self.app.calls, [])
+
+    def test_rpc_accepts_an_existing_working_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = json.dumps({
+                "method": "thread/settings/update",
+                "params": {"threadId": "thread-1", "cwd": temp},
+            }).encode()
+            request, sent = handler("/rpc", payload)
+            request.do_POST()
+        self.assertEqual(
+            self.app.calls,
+            [("thread/settings/update", {"threadId": "thread-1", "cwd": temp}, 300)],
+        )
+        self.assertEqual(json.loads(sent[0][1]), {
+            "result": {"method": "thread/settings/update"},
+        })
+
+    def test_rpc_rejects_relative_or_file_working_directories(self):
+        with tempfile.NamedTemporaryFile() as file:
+            for cwd in ("relative/path", file.name):
+                with self.subTest(cwd=cwd):
+                    payload = json.dumps({
+                        "method": "thread/start", "params": {"cwd": cwd},
+                    }).encode()
+                    request, sent = handler("/rpc", payload)
+                    request.do_POST()
+                    error = json.loads(sent[0][1])["error"]
+                    self.assertEqual(error["code"], -32602)
+        self.assertEqual(self.app.calls, [])
+
     def test_notify_and_success_response_contracts(self):
         payload = json.dumps({
             "method": "initialized",

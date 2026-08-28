@@ -193,6 +193,26 @@ class AppServer:
 
 APP = None
 
+CWD_METHODS = frozenset({"thread/start", "thread/settings/update", "turn/start"})
+
+
+def cwd_error(method, params):
+    """Reject working directories that would make the next turn unlaunchable.
+
+    The app-server persists cwd changes without checking that the directory
+    exists. A typo therefore survives the settings update and the next turn
+    fails before its command process can start. Validate at the shared bridge
+    boundary so UI and raw /rpc callers get the same behavior.
+    """
+    if method not in CWD_METHODS or not isinstance(params, dict) or "cwd" not in params:
+        return None
+    path = params.get("cwd")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return "working directory must be an absolute path"
+    if not os.path.isdir(path):
+        return f"working directory does not exist or is not a directory: {path}"
+    return None
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -496,6 +516,10 @@ class Handler(BaseHTTPRequestHandler):
         method = req.get("method")
         if not method:
             return self._send(400, b'{"error":"no method"}')
+        invalid_cwd = cwd_error(method, req.get("params"))
+        if invalid_cwd:
+            body = {"error": {"code": -32602, "message": invalid_cwd}}
+            return self._send(200, json.dumps(body).encode())
         if req.get("notify"):
             APP.notify(method, req.get("params"))
             return self._send(200, b'{"ok":true}')
