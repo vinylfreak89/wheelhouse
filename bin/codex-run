@@ -537,7 +537,8 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     Exists because dispatches are multi-paragraph with strict output contracts;
     passing them as argv is unreadable and invites quoting bugs.
     """
-    text = open(os.path.expanduser(path)).read()
+    with open(os.path.expanduser(path), encoding="utf-8") as prompt:
+        text = prompt.read()
     inp = [{"type": "text", "text": text}]
     if skill:
         inp.append({"type": "skill", "name": skill,
