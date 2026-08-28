@@ -320,6 +320,12 @@ def project_of(tid):
 
 
 DEFAULT_EFFORT = os.environ.get("CODEX_EFFORT", "xhigh")
+# Match the orchestrator's own posture rather than forcing full autonomy on
+# every new thread. `never` returns sandbox failures straight to the agent and
+# never asks -- strictly more permissive than the Claude session driving it,
+# which still stops for risky work. `auto-review` keeps the sandbox and routes
+# approvals to the review agent, which is the closer analogue.
+DEFAULT_APPROVALS = os.environ.get("CODEX_APPROVALS", "auto-review")
 
 
 # ------------------------------------------------------------------ tree lock
@@ -488,16 +494,31 @@ def find_thread(name, cwd=None):
     return best
 
 
+def approval_overrides(mode):
+    """Mode name -> the protocol's two fields. Mirrors ui/index.html's
+    approvalOverrides(), because the CLI and the UI must agree on what a mode IS.
+
+    `auto-review` is NOT an approvalPolicy value -- it is on-request routed to the
+    review agent, so it needs approvalsReviewer too. Sending the bare string as a
+    policy is invalid, which is why this cannot be a one-word default change.
+    """
+    if not mode:
+        return {}
+    if mode == "auto-review":
+        return {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"}
+    return {"approvalPolicy": mode, "approvalsReviewer": "user"}
+
+
 def new(name, cwd=None, model=None, effort=None, sandbox="workspace-write",
-        approvals="never", reuse=True):
+        approvals=DEFAULT_APPROVALS, reuse=True):
     if reuse:
         existing = find_thread(name, cwd)
         if existing:
             bind_project(existing, cwd)
             return existing
     effort = effort or DEFAULT_EFFORT
-    p = {"cwd": project_cwd(cwd), "sandbox": sandbox,
-         "approvalPolicy": approvals, "threadSource": "user"}
+    p = {"cwd": project_cwd(cwd), "sandbox": sandbox, "threadSource": "user"}
+    p.update(approval_overrides(approvals))
     if model: p["model"] = model
     if effort: p["config"] = {"model_reasoning_effort": effort}
     res = rpc("thread/start", p, 90)

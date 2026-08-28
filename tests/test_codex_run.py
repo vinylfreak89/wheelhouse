@@ -210,6 +210,53 @@ class ThreadResolutionTests(unittest.TestCase):
             self.assertEqual(saved["threads"]["right"]["chat_id"], "local-right")
 
 
+class ApprovalDefaultTests(unittest.TestCase):
+    """The CLI and the UI must agree on what an approval mode IS.
+
+    `auto-review` is not an approvalPolicy value: the protocol wants
+    approvalPolicy=on-request PLUS approvalsReviewer=auto_review. The CLI used
+    to write `approvalPolicy` straight from its argument, so it could not
+    express the mode the UI offers, and it defaulted to `never` -- fully
+    autonomous, and more permissive than the session driving it.
+    """
+
+    def test_auto_review_maps_to_both_protocol_fields(self):
+        self.assertEqual(
+            codex_run.approval_overrides("auto-review"),
+            {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"})
+
+    def test_other_modes_pass_through_with_user_as_reviewer(self):
+        for mode in ("never", "on-request", "untrusted"):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    codex_run.approval_overrides(mode),
+                    {"approvalPolicy": mode, "approvalsReviewer": "user"})
+
+    def test_empty_mode_sends_nothing_so_the_server_default_stands(self):
+        self.assertEqual(codex_run.approval_overrides(None), {})
+        self.assertEqual(codex_run.approval_overrides(""), {})
+
+    def test_new_threads_default_to_auto_review_not_never(self):
+        sent = {}
+
+        def fake_rpc(method, params=None, timeout=None):
+            if method == "thread/start":
+                sent.update(params or {})
+                return {"thread": {"id": "t-new"}}
+            return {}
+
+        with mock.patch.object(codex_run, "find_thread", return_value=None), \
+             mock.patch.object(codex_run, "rpc", side_effect=fake_rpc), \
+             mock.patch.object(codex_run, "bind_project"), \
+             mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-x", "Chat")):
+            codex_run.new("Chat", cwd=os.getcwd())
+
+        self.assertEqual(sent.get("approvalPolicy"), "on-request")
+        self.assertEqual(sent.get("approvalsReviewer"), "auto_review")
+        self.assertNotEqual(sent.get("approvalPolicy"), "never")
+
+
 class TurnSettingInheritanceTests(unittest.TestCase):
     def test_claude_task_inherits_thread_cwd_unless_explicitly_overridden(self):
         with tempfile.TemporaryDirectory() as temp:
