@@ -433,6 +433,10 @@ const UIContracts=Object.freeze({
     if(!currentThreadId||!viewReady) return "not-ready";
     return eventThreadId===currentThreadId?"current":"other";
   },
+  optimisticEchoIndex(entries,{threadId,text,nowMs=Date.now(),maxAgeMs=120000}){
+    return entries.findIndex(entry=>entry.threadId===threadId&&entry.text===text&&
+      nowMs-entry.at>=0&&nowMs-entry.at<=maxAgeMs);
+  },
   resetCountdown(resetsAt,nowMs=Date.now()){
     if(!resetsAt) return "";
     const remainingMs=resetsAt*1000-nowMs;
@@ -1496,6 +1500,27 @@ async function createThread(){
 bindModal();
 
 /* ---------- send ---------- */
+const optimisticUserEchoes=[];
+function addOptimisticUser(threadId,text,who){
+  const entry={threadId,text,at:Date.now()};
+  optimisticUserEchoes.push(entry);
+  add("user",who,text);
+  return entry;
+}
+function discardOptimisticUser(entry){
+  const index=optimisticUserEchoes.indexOf(entry);
+  if(index>=0) optimisticUserEchoes.splice(index,1);
+}
+function consumeOptimisticUser(threadId,item){
+  const now=Date.now();
+  for(let i=optimisticUserEchoes.length-1;i>=0;i--)
+    if(now-optimisticUserEchoes[i].at>120000) optimisticUserEchoes.splice(i,1);
+  const index=UIContracts.optimisticEchoIndex(optimisticUserEchoes,
+    {threadId,text:textOf(item),nowMs:now});
+  if(index<0) return false;
+  optimisticUserEchoes.splice(index,1);
+  return true;
+}
 async function send(){
   const t=$("#inp").value.trim();
   if(!t||!cur) return;
@@ -1508,23 +1533,31 @@ async function send(){
     if(cur!==threadId) return;
     if(!steerTo){ add("err","steer","no active turn to steer"); return; }
     $("#inp").value="";
-    add("user","you (steer)",t);
+    const optimistic=addOptimisticUser(threadId,t,"you (steer)");
     const r=await rpc("turn/steer",
       {threadId,expectedTurnId:steerTo,input:[{type:"text",text:t}]},120);
-    if(r.error&&cur===threadId) add("err","turn/steer",JSON.stringify(r.error).slice(0,400));
+    if(r.error){
+      discardOptimisticUser(optimistic);
+      if(cur===threadId) add("err","turn/steer",JSON.stringify(r.error).slice(0,400));
+    }
     return;
   }
 
   $("#inp").value="";
-  add("user","you",t);
+  const optimistic=addOptimisticUser(threadId,t,"you");
   setBusy(true);
   const p=UIContracts.turnStart({threadId,text:t,
     model:$("#selModel").value,effort:$("#selEffort").value,
     approvalPolicy:$("#selAppr").value,
     serviceTier:$("#selTier")&&$("#selTier").value});
   const r=await rpc("turn/start",p,900);
+  if(r.error){
+    discardOptimisticUser(optimistic);
+    if(cur===threadId){ add("err","turn/start",JSON.stringify(r.error).slice(0,400));
+      setBusy(false); }
+    return;
+  }
   if(cur!==threadId) return;
-  if(r.error){ add("err","turn/start",JSON.stringify(r.error).slice(0,400)); setBusy(false); return; }
   const tn=(r.result||{}).turn||{};
   if(tn.id) curTurn=tn.id;
   refreshMetaAfterTurnStart(threadId);
@@ -1928,7 +1961,13 @@ es.onmessage=async ev=>{
   else if(meth==="item/completed"){
     const it=p.item||{}; const ty=String(it.type||"");
     if(/subAgent|collabAgent/i.test(ty)) loadAgents();
-    if(/^user/i.test(ty)) return;              // already shown when we sent it
+    if(/^user/i.test(ty)){
+      // A local send was rendered optimistically; an instruction injected by
+      // Claude or another bridge client was not. Suppress only the matching
+      // local echo, otherwise display the protocol event immediately.
+      if(!consumeOptimisticUser(p.threadId,it)) renderItem(it);
+      return;
+    }
     if(/agentMessage|agent_message/i.test(ty)){
       const stick=atBottom(); renderMd(streamEl); streamEl=null;
       if(stick) logEl.scrollTop=logEl.scrollHeight;

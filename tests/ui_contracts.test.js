@@ -227,6 +227,22 @@ test("thread events cannot render before the selected transcript is attached", (
   }), "current");
 });
 
+test("only a matching recent local user message is treated as an echo", () => {
+  const pending = [
+    {threadId: "thread-1", text: "local prompt", at: 1000},
+    {threadId: "thread-2", text: "same words", at: 1500},
+  ];
+  assert.equal(contracts.optimisticEchoIndex(pending, {
+    threadId: "thread-1", text: "local prompt", nowMs: 2000,
+  }), 0);
+  assert.equal(contracts.optimisticEchoIndex(pending, {
+    threadId: "thread-1", text: "injected by Claude", nowMs: 2000,
+  }), -1);
+  assert.equal(contracts.optimisticEchoIndex(pending, {
+    threadId: "thread-2", text: "same words", nowMs: 200000,
+  }), -1);
+});
+
 test("reset countdown carries rounded minutes into hours", () => {
   assert.equal(contracts.resetCountdown(17999, 0), "5h");
   assert.equal(contracts.resetCountdown(3599, 0), "1h");

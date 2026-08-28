@@ -264,6 +264,18 @@ class UiStaticTests(unittest.TestCase):
         self.assertLess(route, delta)
         self.assertIn('threadRoute==="not-ready"||threadRoute==="other"', events)
 
+    def test_external_user_items_render_live_while_local_echoes_are_deduplicated(self):
+        sent = self.html.split("/* ---------- send ---------- */", 1)[1].split(
+            "/* ---------- stop", 1)[0]
+        self.assertIn("const optimisticUserEchoes=[]", sent)
+        self.assertIn("addOptimisticUser(threadId,t", sent)
+        events = self.html.split("es.onmessage=async ev=>", 1)[1]
+        completed = events.split('else if(meth==="item/completed")', 1)[1].split(
+            "else if(/^thread", 1)[0]
+        self.assertIn("if(!consumeOptimisticUser(p.threadId,it)) renderItem(it)",
+                      completed)
+        self.assertNotIn("already shown when we sent it", completed)
+
     def test_removed_transcript_cache_hook_is_not_called(self):
         self.assertNotIn("txUpdateLast", self.html)
 
