@@ -417,6 +417,13 @@ const UIContracts=Object.freeze({
     // but an approval-paused turn must not make them impossible to choose.
     for(const control of turnControls) control.disabled=false;
   },
+  // Those same controls override the next turn of the SELECTED thread, so a
+  // choice belongs to one thread only. Carried into another thread it both
+  // misreports that thread's settings and silently applies the override to
+  // the new thread's next turn -- turn/start reads these values verbatim.
+  resetTurnControls(turnControls){
+    for(const control of turnControls) control.value="";
+  },
   tailThreshold:160,
   nearTail(pane,threshold=this.tailThreshold){
     return pane.scrollHeight-pane.scrollTop-pane.clientHeight<=threshold;
@@ -1409,6 +1416,10 @@ let openGeneration=0;
 async function open_(id){
   const generation=++openGeneration;
   threadViewReady=false;
+  // Overrides chosen for the thread being left do not describe the thread
+  // being entered. Clear before cur moves, so the controls fall back to the
+  // incoming thread's resolved defaults.
+  if(cur!==id) UIContracts.resetTurnControls($$("#ctl select"));
   cur=id; streamEl=null; reasonEl=null; curTurn=null;
   rememberThreadId(id);
   renderedMetaFingerprint="";

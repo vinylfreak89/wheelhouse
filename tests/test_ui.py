@@ -310,9 +310,14 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("UIContracts.mutatePreservingTail(logEl", approval)
         self.assertNotIn("scrollIntoView", approval)
 
-    def test_node_contract_suite(self):
+    def test_node_suites(self):
+        # Discover every tests/*.test.js rather than naming one, so a new
+        # JavaScript suite cannot be added and then silently never run.
+        suites = sorted(f"tests/{p.name}"
+                        for p in Path(__file__).parent.glob("*.test.js"))
+        self.assertIn("tests/ui_contracts.test.js", suites)
         result = subprocess.run(
-            ["node", "--test", "tests/ui_contracts.test.js"],
+            ["node", "--test", *suites],
             cwd=REPO, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
