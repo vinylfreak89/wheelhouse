@@ -5,6 +5,29 @@ description: Hand work to OpenAI Codex from Claude and watch it run in the Wheel
 
 # Running work on Codex
 
+## What to read, and when
+
+**This file carries every rule. Nothing you are required to obey lives anywhere
+else, so no link below has to be followed for you to act correctly.**
+
+Sections are ordered by when you need them. Everything down to "Skill roots"
+applies to **every** dispatch. The last two sections — **"Blindness must be
+STRUCTURAL"** and **"The spec-and-results loop"** — are mandatory only in their
+modes: read them before setting up an independent derivation, an experiment, or
+a design exchange where Codex specifies and you execute.
+
+Three companion files sit beside this one. They hold the *why* — the incident
+behind each rule, the reasoning, and the reference tables — and are **optional
+background**:
+
+| file | holds | open it when |
+|---|---|---|
+| `./INCIDENTS.md` | the post-mortem behind each rule here — what it cost the first time it was not followed | a rule seems excessive, or you are tempted to make an exception |
+| `./ORCHESTRATION.md` | the reasoning for two-agent work: why blindness fails when merely instructed, why prespecification is the point | you are designing an experiment or a spec-and-results exchange |
+| `./PROTOCOL.md` | architecture, the raw JSON-RPC method table, thread/project resolution internals | the CLI has no subcommand for what you need, or you are changing the bridge |
+
+`LOCAL.md`, if present, is **not optional** — see the next section.
+
 ## Load the local overlay first
 
 If `LOCAL.md` exists beside this file, read it completely before acting. It
@@ -17,28 +40,34 @@ the public skill, or include its private details in a dispatch unless the user
 explicitly asks for that disclosure. `LOCAL.example.md` documents the supported
 shape without carrying anyone's local policy.
 
-Codex is driven through the **app-server JSON-RPC protocol**, not the CLI and not
-the official desktop app. A local bridge exposes it over HTTP so both Claude and
-the GUI can drive the *same* server — the protocol has no thread ownership
-model, so several clients may attach to one thread. That is the whole point:
-the user watches in the window while Claude drives, and either can type.
+## Hard rules
 
-    Wheelhouse.app (WKWebView) ─┐
-                           ├─→ bridge.py 127.0.0.1:8770 ─→ codex app-server
-    Claude (curl /rpc)  ───┘
-
-every trade-off and the upstream bugs that forced them.
+0. **Go through `bin/codex-run`.** It guarantees the GUI is up. If you find
+   yourself typing `python3 bridge.py`, stop — the user cannot see that.
+1. **Clean up threads you create.** Name throwaway probes `[test] …` so they are
+   obvious, then remove them. Never delete a thread the user has typed into.
+2. **Archive to tidy up, delete only to reclaim space.** `thread/archive` keeps
+   the transcript and rollout; `thread/delete` **destroys the rollout JSONL**.
+   The trail lives at `~/.codex/sessions/**/rollout-*.jsonl`.
+3. **Never spawn a second app-server.** Doing so once rotated the user's shared
+   OAuth refresh token. Attach to the running one, or use
+   `codex app-server proxy`.
+4. **Never install `claude`, never put it on PATH.** See "Speaking Codex's
+   language" — this is a boundary, not an obstacle.
+5. Default new threads to `sandbox:"workspace-write"`, `approvalPolicy:"never"`
+   unless the user asks otherwise; raise to `on-request`/`untrusted` for
+   anything destructive.
+6. **Do not use the official desktop app.** It cannot drive these threads;
+   `./PROTOCOL.md` has the upstream issues.
 
 ## Use the CLI — do not hand-roll the startup
 
     <repo>/bin/codex-run
 
-**Always drive Codex through this.** Every subcommand preflights: it launches
-`Wheelhouse.app` if it is not running, waits for the bridge, then acts. With no
-bundle present, or under `CODEX_HEADLESS=1`, it runs `bridge.py` itself instead,
-so the CLI works with no window at all. Starting
-`bridge.py` directly also "works" and is WRONG — it leaves the user with no
-window to watch, which is the entire point of this setup.
+**Always drive Codex through this.** Every subcommand preflights the GUI and
+bridge for you. Starting `bridge.py` directly also "works" and is WRONG — it
+leaves the user with no window to watch, which is the entire point of this
+setup.
 
     codex-run say "do the thing"        # most common — auto-named from this chat
     codex-run up                        # just ensure GUI + bridge are live
@@ -50,271 +79,32 @@ window to watch, which is the entire point of this setup.
     codex-run archive <id>              # tidy up, KEEPS the transcript
     codex-run rm <id>                   # delete permanently
 
-`cwd` defaults to the directory you are working in, so the thread lands in the
-right project group and the sandbox is scoped to that project. Pass an explicit
-cwd only to override.
+The remaining subcommands are introduced below alongside the rule that requires
+them: `lock` (tree lock), `busy` / `reload` / `restart` (restarting), `on-file`
+and `queue` (continuation), `task` (effort, and writes outside the thread's
+cwd), `project` and `rename` (thread resolution).
+
+`cwd` defaults to the directory you are working in. Pass an explicit cwd only to
+override.
 
 **Names are automatic and should stay that way.** `codex-run` names a thread
-after **this chat** — e.g. `API migration review`. It resolves Claude's exported
-session id against the desktop session JSON, then binds the resulting stable id
-and title to the thread. Two chats in the same directory therefore cannot steal
-one another's thread merely by becoming active most recently. Direct terminal
-use, where no Claude session id exists, falls back to the most recently active
-same-directory session. The user should be able to look at a Codex thread and
-know which conversation spawned it.
-
-No `[project]` prefix: the sidebar already groups by `cwd`, so the prefix is
-redundant. Pass an explicit name only when one thread per chat is not enough.
+after **this chat** — e.g. `API migration review`. No `[project]` prefix. Pass
+an explicit name only when one thread per chat is not enough.
 
 Requires `codex` on PATH (brew cask), `python3`, and `~/.codex/auth.json`.
 Never start a second `codex app-server` by hand.
 
-## Raw protocol (escape hatch)
-
-Only when the CLI has no subcommand for what you need. Still run
-`codex-run up` first so the GUI exists.
-
-    curl -s -XPOST 127.0.0.1:8770/rpc -H 'Content-Type: application/json' \
-      -d '{"method":"thread/list","params":{"limit":10}}'
-
-Core flow: `thread/start` → `thread/name/set` → `turn/start` → watch `/events`.
-
-| need | method |
-|---|---|
-| new thread | `thread/start` {cwd, sandbox, approvalPolicy, model, threadSource:"user"} |
-| name it | `thread/name/set` {threadId, name} |
-| send a message | `turn/start` {threadId, input:[{type:"text",text}], model?, effort?} |
-| type into a RUNNING turn | `turn/steer` {threadId, expectedTurnId, input} |
-| stop a turn | `turn/interrupt` {threadId, turnId} |
-| history with tool output | `thread/turns/list` {threadId, itemsView:"full"} |
-| effective settings | `GET /threadmeta?id=<threadId>` (model, effort, sandbox, tokens) |
-| live stream | `GET /events` (SSE) |
-
-Threads are named after the driving chat (see above). There is **no project
-API** — the sidebar groups by `cwd`, so set `cwd` to the project directory.
-
-## Do NOT restate what Codex already loads
-
-Codex reads applicable `AGENTS.md` instructions automatically on every thread.
-Everything in them is already in context: project conventions, hard rules,
-directory layout, and scoped guidance.
-
-So a dispatch must NOT re-state:
-  * project conventions or coding standards
-  * sandbox etiquette or other instructions already in `AGENTS.md`
-  * background about the project
-
-Repeating it wastes tokens on every turn AND dilutes the actual instruction —
-the one novel thing you are asking for competes with 800 lines it already knows.
-
-A dispatch should carry ONLY what is genuinely new to this task:
-  1. the goal
-  2. the specific inputs (job id, path, commit)
-  3. anything that CONTRADICTS or narrows the standing instructions
-  4. the output contract
-
-Before asking Codex to change an instruction file, inspect whether it is a
-symlink and edit the real target rather than replacing the link. Any current
-embargoes or special relationships between local instruction files belong in
-`LOCAL.md`, not here.
-
-## Restarting the app kills running turns
-
-The bridge owns `codex app-server` as a CHILD process. Killing the bridge — or
-the app — aborts any turn in flight. Observed: a user's message was accepted,
-started a turn, and was destroyed six seconds later by a restart; the text was
-never persisted anywhere recoverable (`task_started` and `turn_aborted` in the
-rollout, no `user_message` record, nothing in the queue DB).
-
-    codex-run reload      # UI changes — hot-reloads the page, no turn loss
-    codex-run busy        # exits non-zero if any thread is mid-turn
-    codex-run restart     # REFUSES while a turn is active
-
-UI changes never need a restart: the bridge serves `ui/index.html` fresh on
-every request. Only Swift shell changes require relaunching the app.
-
-## Codex cannot wait for anything — continuation is YOUR job
-
-There is no wait-for-trigger primitive. A turn runs to completion and stops.
-Of the 95 client methods the only related ones are `fs/watch` / `fs/unwatch`
-(which notify the CLIENT, not the agent) and `hooks/list` (read-only). Do not
-write a dispatch that says "wait until X appears then continue" — it will either
-stop immediately or burn tokens polling in a loop.
-
-Two mechanisms, both driven from outside:
-
-    codex-run on-file <path> <id> <taskfile>    # wait for a file, then dispatch
-    codex-run queue <id> "<text>"               # queue a turn to run after this one
-
-`on-file` waits for the path to exist AND stop changing size (three stable
-polls) before dispatching, so a half-written file is never consumed, and it
-waits for any in-flight turn to finish rather than colliding with it.
-
-For anything more complex — a condition, an external event, a schedule — the
-orchestrator polls and dispatches. Split the work into phases that each end in
-a written artifact, and gate the next phase on that artifact appearing.
-
-## Blindness must be STRUCTURAL, never instructed
-
-If a task requires an agent to derive something independently and only THEN be
-compared against a reference answer, you cannot achieve that by telling it not
-to look. Access is capability: if the reference is reachable, it will leak into
-the derivation — usually at the moment the agent gets stuck, which is exactly
-when contamination matters most.
-
-Observed, and admitted by Codex unprompted when asked directly:
-
-    "I also used Claude's recorded outputs to reconstruct expected diffs too
-     early. Most clearly, when regeneration failed, I mechanically applied line
-     changes known from Claude's result ... That contaminates the replay."
-
-The dispatch had said to reconstruct the reference "for comparison" while
-handing over the transcript that contained it. The resulting convergence figures
-measured copying, not re-derivation, and were reported as a result before anyone
-checked. **A contaminated run is worse than a failed one: it produces confident
-numbers that mean nothing.**
-
-Enforce it with a barrier the agent cannot cross:
-
-1. **Stage inputs per step.** Step N's working directory contains ONLY the
-   instruction and the artifacts legitimately available at that point.
-2. **Keep the reference out of reach** — a different directory, or withheld by
-   the orchestrator entirely — until the agent has written its own result.
-3. **Freeze before reveal.** The agent commits its output (a file, a hash) and
-   says so. Only then is the reference exposed.
-4. **Compare as a separate step**, ideally a separate agent, so the comparer
-   cannot retro-fit the derivation.
-
-If you cannot stage it that way, at minimum ASK the agent afterwards whether it
-stayed blind, and treat the answer as evidence — it will often tell you plainly
-that it did not. Better: do not rely on that.
-
-Use this structural separation whenever "independent derivation" matters.
-
-## Orchestrating well — Codex cannot see your context
-
-You are the orchestrator; Codex is a separate agent with **none** of your
-conversation, your files-in-mind, or your assumptions. An instruction that feels
-complete to you is usually underspecified to it.
-
-Every dispatch must carry:
-
-1. **The exact entrypoint** — script path and subcommand, not "run the gate".
-2. **Which inputs** — the specific job id, file, or commit. A pipeline stage
-   named without its job will make Codex guess, and it will guess wrong.
-3. **Preconditions** — what must already exist, and what to do if it does not
-   (fail loudly, rather than invent a path).
-4. **The output contract** — exactly what the final message must contain. If the
-   work touches private material, say explicitly that the reply may carry status,
-   counts, and tooling errors ONLY, never content.
-
-Observed failure: dispatching "run the Filter B evaluator stage" produced correct
-stage names and zeros, because `b2_evaluator` is stage 7 of a pipeline and no job
-id was given. Codex behaved reasonably; the instruction was incomplete.
-
-When a run comes back empty or wrong, re-read the dispatch before blaming the
-model.
-
-## The spec-and-results loop (when Codex designs, you execute)
-
-The strongest use of a second agent is not "do this task" but **it designs, you
-run, it interprets** — because the two of you have different access. Codex can
-read material you must not; you have a warm harness and can run long jobs in the
-background. Handing work across that boundary needs a protocol, or you spend the
-turn steering.
-
-Failures observed building this loop, each of which the protocol below prevents:
-
-- **Roles stated too late.** A brief that says "design AND run the experiment"
-  gets Codex grinding through jobs that take minutes each, when it should have
-  handed back a spec. State the division of labour in the FIRST message, not in
-  a `steer`.
-- **No machine-readable handoff.** Prose describing which spans to test has to
-  be parsed by hand and transcribed, which is where errors enter. Demand a
-  JSON artifact.
-- **Runtimes unknown to Codex.** It cannot see how slow your tooling is. Tell it
-  ("one classification at 5k tokens is ~3 min") or it will plan work it cannot
-  finish inside a turn.
-- **Blindness restated ad hoc.** If the reader must not learn the corpus, say so
-  as a standing output contract in every brief, not as an afterthought.
-
-### The protocol
-
-1. **You brief** with roles explicit: who reads what, who executes, who
-   interprets. Include the tooling entry points, the runtime per unit of work,
-   and the output contract.
-2. **Codex returns two artifacts**: a machine-readable spec (`spec.json` — ids,
-   file paths, line ranges, arms, parameters) and a prose report containing its
-   reasoning and, critically, its **prespecified analysis**: the contrast it
-   will compute and the evidence thresholds it will judge by, fixed BEFORE any
-   data exists.
-3. **You execute** the spec verbatim and return a results table **keyed by the
-   spec's ids**. Do not reinterpret the design while running it; if the spec is
-   unrunnable, say so and ask, because silently substituting your own version
-   destroys the prespecification.
-4. **Codex interprets** against its own fixed thresholds.
-5. **Hook every dispatch before you move on.** A turn that ends with unhooked
-   background work means you find out it finished by remembering to poll -- and
-   you will forget. Codex went idle for a full exchange once while the driver
-   kept saying "still running", because nothing was watching it.
-
-### Close the loop yourself — settle it, then narrate
-
-When the other agent's critique conflicts with your evidence, do not hand the
-user a choice between two positions. Run the experiment that decides it and
-send the result back. Keep the user informed of the exchange and its outcome;
-what they should not have to do is adjudicate.
-
-The exchange that works has four parts:
-
-1. **Concede what actually lands, by name.** Quote the specific claim you are
-   accepting rather than gesturing at "good points".
-2. **Falsify with a decomposition, not an argument.** If the critique says two
-   factors were confounded, vary them one at a time. A measured `0.000e+00` on
-   the factor it blamed ends the discussion; a paragraph does not.
-3. **Separate the process criticism from the mechanism.** These come apart, and
-   the distinction matters: an objection that you failed to isolate two
-   variables can be entirely correct while the confound it names turns out to
-   have zero magnitude. You were then right for inadequate reasons, which is
-   worth saying out loud.
-4. **Ask questions that can be ANSWERED, not agreed with.** "Does this change
-   your conclusion?" invites assent. "Under your own standard, what concrete
-   test would make this creditable, in a form I can run?" produces a design.
-
-Expect to be corrected in return, including on things you asserted while
-conceding. A good counterpart also corrects ITS OWN earlier work: in one
-exchange it withdrew two named sentences of its critique AND independently
-tightened a validity gate it had specified itself, which retroactively weakened
-its own falsification. That is the loop working.
-
-**Do not relay a disagreement upward as a decision.** The user asked for the
-two agents to fight it out and reach agreement; a summary of who was right about
-what is strictly less useful than a settled answer plus the evidence.
-
-### Take the tree lock before writing a shared checkout
-
-Both sides write the same working tree: you edit files directly, and a Codex
-turn edits them from inside. Nothing stops the two interleaving, and the damage
-is quiet rather than loud:
-
-* `git add` sweeps up whatever the other side left modified. An approvals fix
-  once landed inside a commit titled "ui: test and refresh turn parameters",
-  authored by neither party as a unit.
-* Reloading the UI mid-write serves half-written JS, because the bridge reads
-  `index.html` from disk with `Cache-Control: no-store`.
-* Two `git commit` calls racing produce a history nobody can attribute.
+## Take the tree lock before writing a shared checkout
 
     codex-run lock status                    # who holds it, and since when
     codex-run lock acquire claude "why"      # take it before you edit
     codex-run lock release
 
 `codex-run task` takes the lock for the DURATION of the turn automatically and
-releases it in a `finally`, so a crashed dispatch cannot wedge it. If the lock
-is already held it warns and proceeds rather than blocking — set `LOCK_WAIT=300`
-to wait instead.
+releases it in a `finally`. If the lock is already held it warns and proceeds
+rather than blocking — set `LOCK_WAIT=300` to wait instead.
 
-**It is advisory.** Nothing in the filesystem enforces it; it works only because
-both sides check. Treat a held lock as a hard stop and wait, rather than
+**It is advisory.** Treat a held lock as a hard stop and wait, rather than
 reasoning that your edit is small enough not to matter.
 
 **Staleness has two forms, and conflating them breaks it.** A turn holds the
@@ -324,10 +114,11 @@ command — that is normal, not stale. Manual holds record no pid and expire on
 age (`LOCK_MAX_AGE`, default 3600s).
 
 **Commit narrowly.** `git add <explicit paths>`, never `-A`, whenever the other
-side might have the tree open. If both parties are going to work concurrently
-and often, the real fix is separate worktrees, not a tighter lock.
+side might have the tree open.
 
-### Never leave work unhooked
+*Why: `./INCIDENTS.md`, "Three ways an unlocked shared checkout went wrong".*
+
+## Never leave work unhooked
 
 Both halves of the loop run in the background, and both need a hook:
 
@@ -344,83 +135,125 @@ notification. Both forms cap their iterations: an unbounded wait on a job that
 died silently hangs until the turn ends.
 
 Prefer ONE hook covering several jobs when they are serialised behind each
-other -- one notification when the queue drains beats four interleaved ones.
-`codex-run on-file <path> <id> <taskfile>` is the stronger form when the next
-step is itself a dispatch: it waits for a file to appear AND stop changing,
+other. `codex-run on-file <path> <id> <taskfile>` is the stronger form when the
+next step is itself a dispatch: it waits for a file to appear AND stop changing,
 waits out any active turn, then sends the follow-up without you in the loop.
 
-### Why prespecification is the point
+*Why: `./INCIDENTS.md`, "Nothing was watching, so nothing was noticed".*
 
-You will otherwise select the thing that scored highest, sweep it, and discover
-an effect that is partly regression to the mean. Codex will catch this if you
-let it — in one exchange it excluded a span from its own candidate set on the
-grounds that the span had been chosen as a maximum in earlier work, and
-hash-stamped its spec file so the prespecification was verifiable after the
-fact. Ask for that discipline explicitly; it makes a falsifiable result possible
-rather than a persuasive one.
+## Do NOT restate what Codex already loads
 
-**Report failures faithfully.** When the run falsifies the hypothesis you handed
-over, hand back the numbers that falsify it, plainly labelled. A loop that only
-returns confirming evidence is worse than no loop.
+Codex reads applicable `AGENTS.md` instructions automatically on every thread.
+Everything in them is already in context: project conventions, hard rules,
+directory layout, and scoped guidance.
 
-## Speaking Codex's language
+So a dispatch must NOT re-state:
+  * project conventions or coding standards
+  * sandbox etiquette or other instructions already in `AGENTS.md`
+  * background about the project
 
-Codex is not Claude Code. Two differences bite immediately:
+A dispatch should carry ONLY what is genuinely new to this task:
+  1. the goal
+  2. the specific inputs (job id, path, commit)
+  3. anything that CONTRADICTS or narrows the standing instructions
+  4. the output contract
 
-**Sub-agents are separate threads.** Codex spawns them as child threads linked by
-spawn edges, discoverable with `thread/list {ancestorThreadId}` and shown in the
-app's Agents tab. They are NOT inline tool calls, and they do not appear in a
-default `thread/list` (interactive sources only). When you want fan-out, say
-"spawn a sub-agent per X" — do not assume the Claude Task-tool shape.
+Before asking Codex to change an instruction file, inspect whether it is a
+symlink and edit the real target rather than replacing the link. Any current
+embargoes or special relationships between local instruction files belong in
+`LOCAL.md`, not here.
 
-**Anything that shells out to `claude` will fail — and must keep failing.**
-The `claude` CLI is deliberately NOT on PATH.
+## Orchestrating well — Codex cannot see your context
 
-> **HARD RULE: never install the `claude` CLI, and never add it to PATH.**
-> Not to "unblock" a run, not temporarily, not in a subshell. Its absence is a
-> deliberate boundary: work handed to Codex must be done BY Codex, not silently
-> bounced back into Claude. If a tool needs it, change the tool's runner.
+Every dispatch must carry:
 
-Tools with a pluggable runner will happily choose a "headless" mode that invokes
-it and die with:
+1. **The exact entrypoint** — script path and subcommand, not "run the gate".
+2. **Which inputs** — the specific job id, file, or commit. A pipeline stage
+   named without its job will make Codex guess, and it will guess wrong.
+3. **Preconditions** — what must already exist, and what to do if it does not
+   (fail loudly, rather than invent a path).
+4. **The output contract** — exactly what the final message must contain. If the
+   work touches private material, say explicitly that the reply may carry status,
+   counts, and tooling errors ONLY, never content.
 
-    RuntimeError: headless call error: Not logged in · Please run /login
+When a run comes back empty or wrong, re-read the dispatch before blaming the
+model.
 
-If a tool offers a runner that invokes `claude`, select a mode in which Codex
-performs the model stages itself, using the tool's supported handoff interface.
-Put exact runner names and private pipeline instructions in `LOCAL.md`.
+## Getting facts out of a run you must not read
 
-### Driving a staged pipeline (the shape that works)
+Sometimes Codex must read material Claude is forbidden to see. Do not read the
+thread. Instead:
 
-Mirror how Claude runs it: resume, then step in order, one sub-agent per stage.
+1. Put a strict OUTPUT CONTRACT in the dispatch naming exactly what may appear.
+2. Ask for the answer on a single machine-readable line, e.g.
+   `RECOVERY_POINT=<iso8601> COMMIT=<sha>` — a fact, not prose.
+3. Extract with a regex for that line only; never print surrounding text.
 
-1. **Resume, do not restart.** Ask the tool for existing state first
-   (`status`, or list its job dir). If a job exists, continue from the first
-   stage with no recorded output. Starting a fresh job silently discards work
-   and, for gates with cumulative filters, corrupts the history.
-2. **Run stages in the tool's declared order** — take the order from the tool
-   itself (e.g. `--stage` choices in `--help`), never from memory.
-3. **Per stage:** `bootstrap` the prompt → spawn a sub-agent to answer it →
-   `submit` the reply. Do not answer bootstrap prompts inline if the tool
-   expects an isolated agent; isolation is usually the point.
-4. **Stop on the first stage error** and report which stage and the verbatim
-   tool error. Do not skip ahead.
+## Codex cannot wait for anything — continuation is YOUR job
+
+There is no wait-for-trigger primitive. A turn runs to completion and stops. Do
+not write a dispatch that says "wait until X appears then continue".
+
+Two mechanisms, both driven from outside:
+
+    codex-run on-file <path> <id> <taskfile>    # wait for a file, then dispatch
+    codex-run queue <id> "<text>"               # queue a turn to run after this one
+
+`on-file` waits for the path to exist AND stop changing size (three stable
+polls) before dispatching, so a half-written file is never consumed, and it
+waits for any in-flight turn to finish rather than colliding with it.
+
+For anything more complex — a condition, an external event, a schedule — the
+orchestrator polls and dispatches. Split the work into phases that each end in
+a written artifact, and gate the next phase on that artifact appearing.
+
+## Writes are scoped to the turn's cwd — reads are not
+
+Under `sandbox: "workspace-write"` Codex may READ almost anywhere but may only
+WRITE beneath the turn's `cwd` (plus /tmp).
+
+**If the work writes anywhere outside the thread's own directory, pass that
+directory as the turn's cwd:**
+
+    codex-run task <id> <file> --effort high --cwd /path/to/sandbox
+
+Use the turn-level override, so one chat keeps one thread while still writing
+into a sandbox.
+
+*Why, and the error it produces: `./INCIDENTS.md`, "Every read worked; the
+first write failed".*
+
+### `--cwd` moves the writes, NOT the conversation
+
+A thread's project is **pinned once**, when `codex-run` first creates or
+resolves it, and nothing a turn does can move it. This is automatic — if you go
+through the CLI there is nothing to remember.
+
+    codex-run project              # name, root, and this chat's pinned thread
+    codex-run project --name NAME  # override (two checkouts, same basename)
+    codex-run project --repair     # pin threads created before the registry
+
+### Thread names are cosmetic — resolution is not
+
+`codex-run rename [<id>] "<name>"` retitles a thread. It is safe to do at any
+time, including on a thread mid-turn.
+
+If you touch that code path, keep the property and test it by exercising it —
+rename, re-resolve, assert the id is unchanged.
+
+The displayed name is the project directory's **basename** — the same name
+Claude Code shows. Do not derive a prettier name from `CLAUDE.md` or anywhere
+else.
 
 ## Effort is a budget decision, not a default
 
-**A turn inherits the thread's CURRENT settings unless you override them.**
-Model, effort and approval policy are omitted from `turn/start` when you do not
-pass them, so the server uses whatever the thread is set to — which is what the
-owner sees in the UI and may have deliberately changed. Sending `effort` on
-every turn silently reverted their choice on the next dispatch, so only send it
-when you have a reason. `codex-run` prints the effective settings at dispatch,
-marking whether the effort came from the thread or from you.
+**A turn inherits the thread's CURRENT settings unless you override them.** Only
+send `effort` when you have a reason. `codex-run` prints the effective settings
+at dispatch, marking whether the effort came from the thread or from you.
 
-`new` still applies `CODEX_EFFORT` (default `xhigh`) when CREATING a thread,
-because a new thread has no prior state to inherit.
+`new` still applies `CODEX_EFFORT` (default `xhigh`) when CREATING a thread.
 
-When you do override, **match the tier to the work** — a blanket `xhigh` burned
-92% of a 5-hour window on one transcript-reading pass.
+When you do override, **match the tier to the work**:
 
 | work | tier |
 |---|---|
@@ -439,72 +272,17 @@ The primary window is 5 hours, the secondary 7 days. A multi-phase job that
 exhausts the 5h window mid-run loses everything it had not yet reported, so
 split phases and check between them. If a phase is cheap, run it cheap.
 
-## Getting facts out of a run you must not read
+## Restarting the app kills running turns
 
-Sometimes Codex must read material Claude is forbidden to see. Do not read the
-thread. Instead:
+The bridge owns `codex app-server` as a CHILD process. Killing the bridge — or
+the app — aborts any turn in flight, unrecoverably.
 
-1. Put a strict OUTPUT CONTRACT in the dispatch naming exactly what may appear.
-2. Ask for the answer on a single machine-readable line, e.g.
-   `RECOVERY_POINT=<iso8601> COMMIT=<sha>` — a fact, not prose.
-3. Extract with a regex for that line only; never print surrounding text.
+    codex-run reload      # UI changes — hot-reloads the page, no turn loss
+    codex-run busy        # exits non-zero if any thread is mid-turn
+    codex-run restart     # REFUSES while a turn is active
 
-## Writes are scoped to the turn's cwd — reads are not
-
-Under `sandbox: "workspace-write"` Codex may READ almost anywhere but may only
-WRITE beneath the turn's `cwd` (plus /tmp). This asymmetry is vicious: a task
-that reads its inputs happily will run for a while and then die on the first
-write with
-
-    fatal: Unable to create '<path>/.git/index.lock': Operation not permitted
-
-Observed: a replay job was pointed at a sandbox under the tool's own directory
-while its thread's cwd was a different project. Every read worked;
-the first `git` operation failed.
-
-**If the work writes anywhere outside the thread's own directory, pass that
-directory as the turn's cwd:**
-
-    codex-run task <id> <file> --effort high --cwd /path/to/sandbox
-
-`thread/start` takes a `cwd`, and `turn/start` takes one that overrides it for
-that turn — use the turn-level override so one chat keeps one thread while
-still writing into a sandbox.
-
-### `--cwd` moves the writes, NOT the conversation
-
-Codex persists a turn's `cwd` into `threads.cwd`. The sidebar used to group on
-that column, so one `--cwd` into a scratch directory silently relocated the
-whole conversation out of its project — and `find_thread` matched on cwd too,
-so the next `codex-run new` could fail to find the thread and split the chat
-across two.
-
-A thread's project is now **pinned once**, when `codex-run` first creates or
-resolves it, in `<repo>/state/projects.json`. The bridge serves
-that at `/projects`, the sidebar groups on it, and nothing a turn does can move
-it. This is automatic — if you go through the CLI there is nothing to remember.
-
-    codex-run project              # name, root, and this chat's pinned thread
-    codex-run project --name NAME  # override (two checkouts, same basename)
-    codex-run project --repair     # pin threads created before the registry
-
-### Thread names are cosmetic — resolution is not
-
-`codex-run rename [<id>] "<name>"` retitles a thread. It is safe to do at any
-time, including on a thread mid-turn, because `find_thread` resolves through
-the registry's **chat** binding rather than the thread's display name. That
-binding is recorded when the thread is first created or resolved.
-
-This was not always true: resolution used to match the display name against the
-chat title, so a single rename would orphan the thread and the next `new` would
-quietly open a second one. If you touch that code path, keep the property and
-test it by exercising it — rename, re-resolve, assert the id is unchanged.
-
-The displayed name is the project directory's **basename** — the same name
-Claude Code shows. Claude Code has no separate project-name record: a project
-IS a cwd, so the basename is authoritative rather than a guess. Do not derive a
-prettier name from `CLAUDE.md` or anywhere else; the sidebar shows the name and
-keeps the full path in the tooltip.
+UI changes never need a restart. Only Swift shell changes require relaunching
+the app.
 
 ## Gotchas that will cost you an hour each
 
@@ -535,25 +313,138 @@ keeps the full path in the tooltip.
    `final_answer`. Read the `final_answer` for the result; a reply that looks
    empty is usually you reading the wrong item or field.
 
-## Hard rules
+## Speaking Codex's language
 
-0. **Go through `bin/codex-run`.** It guarantees the GUI is up. If you find
-   yourself typing `python3 bridge.py`, stop — the user cannot see that.
-1. **Clean up threads you create.** Name throwaway probes `[test] …` so they are
-   obvious, then remove them. Never delete a thread the user has typed into.
-2. **Archive to tidy up, delete only to reclaim space.** `thread/archive` keeps
-   the transcript and rollout; `thread/delete` **destroys the rollout JSONL**.
-   The trail lives at `~/.codex/sessions/**/rollout-*.jsonl`.
-3. **Never spawn a second app-server.** Doing so once rotated the user's shared
-   OAuth refresh token. Attach to the running one, or use
-   `codex app-server proxy`.
-4. **Never install `claude`, never put it on PATH.** See above — this is a
-   boundary, not an obstacle.
-5. Default new threads to `sandbox:"workspace-write"`, `approvalPolicy:"never"`
-   unless the user asks otherwise; raise to `on-request`/`untrusted` for
-   anything destructive.
+Codex is not Claude Code. Two differences bite immediately:
 
-## Do not use the official desktop app
+**Sub-agents are separate threads.** Codex spawns them as child threads linked by
+spawn edges, discoverable with `thread/list {ancestorThreadId}` and shown in the
+app's Agents tab. They are NOT inline tool calls, and they do not appear in a
+default `thread/list` (interactive sources only). When you want fan-out, say
+"spawn a sub-agent per X" — do not assume the Claude Task-tool shape.
 
-It cannot display threads created on a remote host and offers no way to start
-one (openai/codex #27284, #22438, #24280). That is why this exists.
+**Anything that shells out to `claude` will fail — and must keep failing.**
+The `claude` CLI is deliberately NOT on PATH.
+
+> **HARD RULE: never install the `claude` CLI, and never add it to PATH.**
+> Not to "unblock" a run, not temporarily, not in a subshell. Its absence is a
+> deliberate boundary: work handed to Codex must be done BY Codex, not silently
+> bounced back into Claude. If a tool needs it, change the tool's runner.
+
+If a tool offers a runner that invokes `claude`, select a mode in which Codex
+performs the model stages itself, using the tool's supported handoff interface.
+Put exact runner names and private pipeline instructions in `LOCAL.md`.
+
+### Driving a staged pipeline (the shape that works)
+
+Mirror how Claude runs it: resume, then step in order, one sub-agent per stage.
+
+1. **Resume, do not restart.** Ask the tool for existing state first
+   (`status`, or list its job dir). If a job exists, continue from the first
+   stage with no recorded output.
+2. **Run stages in the tool's declared order** — take the order from the tool
+   itself (e.g. `--stage` choices in `--help`), never from memory.
+3. **Per stage:** `bootstrap` the prompt → spawn a sub-agent to answer it →
+   `submit` the reply. Do not answer bootstrap prompts inline if the tool
+   expects an isolated agent.
+4. **Stop on the first stage error** and report which stage and the verbatim
+   tool error. Do not skip ahead.
+
+## Skill roots — this skill is deliberately not one of them
+
+`bridge.py` registers skill roots with the app-server at startup
+(`skills/extraRoots/set`): `<repo>/skills`, plus anything in
+`state/skill-roots.json` or `$CODEX_SKILL_ROOTS`.
+
+**`.claude/skills` is deliberately NOT among them, and must not be added.** This
+skill teaches an agent how to drive Codex — `up`, `restart`, `task` — so loading
+it into Codex's own context invites self-invocation against the bridge that owns
+its app-server. The omission is the design, not an oversight.
+
+## Raw protocol (escape hatch)
+
+Only when the CLI has no subcommand for what you need. Still run
+`codex-run up` first so the GUI exists.
+
+    curl -s -XPOST 127.0.0.1:8770/rpc -H 'Content-Type: application/json' \
+      -d '{"method":"thread/list","params":{"limit":10}}'
+
+**The method table and payload shapes are in `./PROTOCOL.md` — read it before
+hand-rolling RPC.**
+
+---
+
+*The two sections below are mandatory only in the modes they name.*
+
+## Blindness must be STRUCTURAL, never instructed
+
+When a task requires an agent to derive something independently and only THEN be
+compared against a reference answer, telling it not to look does not work.
+Enforce it with a barrier the agent cannot cross:
+
+1. **Stage inputs per step.** Step N's working directory contains ONLY the
+   instruction and the artifacts legitimately available at that point.
+2. **Keep the reference out of reach** — a different directory, or withheld by
+   the orchestrator entirely — until the agent has written its own result.
+3. **Freeze before reveal.** The agent commits its output (a file, a hash) and
+   says so. Only then is the reference exposed.
+4. **Compare as a separate step**, ideally a separate agent, so the comparer
+   cannot retro-fit the derivation.
+
+If you cannot stage it that way, at minimum ASK the agent afterwards whether it
+stayed blind, and treat the answer as evidence — it will often tell you plainly
+that it did not. Better: do not rely on that.
+
+Use this structural separation whenever "independent derivation" matters.
+
+*Why instructing blindness does not work: `./ORCHESTRATION.md`.*
+
+## The spec-and-results loop (when Codex designs, you execute)
+
+1. **You brief** with roles explicit: who reads what, who executes, who
+   interprets. Include the tooling entry points, the runtime per unit of work,
+   and the output contract. State the division of labour in the FIRST message,
+   not in a `steer`. If the reader must not learn the corpus, say so as a
+   standing output contract in every brief, not as an afterthought.
+2. **Codex returns two artifacts**: a machine-readable spec (`spec.json` — ids,
+   file paths, line ranges, arms, parameters) and a prose report containing its
+   reasoning and, critically, its **prespecified analysis**: the contrast it
+   will compute and the evidence thresholds it will judge by, fixed BEFORE any
+   data exists. Ask for that discipline explicitly, and for a hash-stamped spec.
+3. **You execute** the spec verbatim and return a results table **keyed by the
+   spec's ids**. Do not reinterpret the design while running it; if the spec is
+   unrunnable, say so and ask, because silently substituting your own version
+   destroys the prespecification.
+4. **Codex interprets** against its own fixed thresholds.
+5. **Hook every dispatch before you move on.**
+
+**Report failures faithfully.** When the run falsifies the hypothesis you handed
+over, hand back the numbers that falsify it, plainly labelled.
+
+*Why this loop exists, the failures that shaped it, and why prespecification is
+the point: `./ORCHESTRATION.md`.*
+
+### Close the loop yourself — settle it, then narrate
+
+When the other agent's critique conflicts with your evidence, do not hand the
+user a choice between two positions. Run the experiment that decides it and
+send the result back. Keep the user informed of the exchange and its outcome;
+what they should not have to do is adjudicate.
+
+The exchange that works has four parts:
+
+1. **Concede what actually lands, by name.** Quote the specific claim you are
+   accepting rather than gesturing at "good points".
+2. **Falsify with a decomposition, not an argument.** If the critique says two
+   factors were confounded, vary them one at a time.
+3. **Separate the process criticism from the mechanism.** These come apart, and
+   the distinction matters.
+4. **Ask questions that can be ANSWERED, not agreed with.** "Does this change
+   your conclusion?" invites assent. "Under your own standard, what concrete
+   test would make this creditable, in a form I can run?" produces a design.
+
+Expect to be corrected in return, including on things you asserted while
+conceding.
+
+**Do not relay a disagreement upward as a decision.** The user asked for the
+two agents to fight it out and reach agreement.

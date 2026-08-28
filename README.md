@@ -125,6 +125,17 @@ and supervise it. It mostly encodes failure modes that cost real time: restartin
 kills running turns, Codex cannot wait for anything, writes are scoped to the
 turn's cwd while reads are not.
 
+`SKILL.md` holds every rule, ordered by when you need it, so an agent that reads
+only it still behaves correctly. Three companions beside it carry the material
+that used to be inline and is consulted on demand: `INCIDENTS.md` (the
+post-mortem behind each rule), `ORCHESTRATION.md` (methodology for two-agent
+work), and `PROTOCOL.md` (architecture, the raw JSON-RPC method table, thread and
+project resolution internals).
+
+`.claude/skills` is deliberately **not** registered as a Codex skill root: this
+skill drives Codex, so loading it into Codex's own context would invite
+self-invocation against the bridge that owns its app-server.
+
 ## Configuration
 
 | | |
