@@ -193,6 +193,16 @@ test("large item updates follow the tail without snapping a reader who scrolled 
   assert.equal(reading.scrollTop, 420);
 });
 
+test("poll refreshes keep existing thread order and prepend only new threads", () => {
+  const previous = [{id: "a", status: "old-a"}, {id: "b", status: "old-b"}];
+  const refreshed = [{id: "c"}, {id: "b", status: "new-b"},
+                     {id: "a", status: "new-a"}];
+  const stable = contracts.stableById(previous, refreshed);
+  assert.deepEqual(stable.map(item => item.id), ["c", "a", "b"]);
+  assert.equal(stable[1].status, "new-a");
+  assert.equal(stable[2].status, "new-b");
+});
+
 test("multi-bucket usage keeps model-specific limits", () => {
   const buckets = contracts.rateLimitBuckets({
     rateLimits: {limitId: "codex", primary: {usedPercent: 1}},

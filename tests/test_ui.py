@@ -166,6 +166,28 @@ class UiStaticTests(unittest.TestCase):
         self.assertNotIn('$("#selModel").value=m.model', body)
         self.assertNotIn("se.value=m.reasoning_effort", body)
 
+    def test_reload_does_not_infer_effort_from_the_first_catalog_model(self):
+        effort = self.html.split("function effortOptions", 1)[1].split(
+            "function tierOptions", 1)[0]
+        self.assertNotIn("||models[0]", effort)
+        self.assertIn("effectiveDefault!==undefined", effort)
+        boot = self.html.split("/* ---------- boot ---------- */", 1)[1]
+        self.assertIn('effortOptions("", "#selEffort", true, "")', boot)
+        meta = self.html.split("async function loadMeta", 1)[1].split(
+            "let curMeta", 1)[0]
+        self.assertIn('m.reasoning_effort||""', meta)
+
+    def test_unchanged_status_polls_do_not_rebuild_or_reorder_the_sidebar(self):
+        threads = self.html.split("async function loadThreads", 1)[1].split(
+            "const isActive", 1)[0]
+        self.assertIn("UIContracts.stableById(threads,nextThreads)", threads)
+        render = self.html.split("function renderList", 1)[1].split(
+            "function row", 1)[0]
+        self.assertIn("fingerprint===renderedListFingerprint", render)
+        usage = self.html.split("async function loadUsage", 1)[1].split(
+            "/* ---------- effective settings", 1)[0]
+        self.assertIn("html===renderedUsageHtml", usage)
+
     def test_state_changing_notifications_refresh_the_ui(self):
         for method in (
             "thread/settings/updated",

@@ -416,6 +416,12 @@ const UIContracts=Object.freeze({
     pane.scrollTop=follow?pane.scrollHeight:previousTop;
     return result;
   },
+  stableById(previous,incoming){
+    const next=new Map(incoming.map(item=>[item.id,item]));
+    const known=new Set(previous.map(item=>item.id));
+    const added=incoming.filter(item=>!known.has(item.id));
+    return added.concat(previous.filter(item=>next.has(item.id)).map(item=>next.get(item.id)));
+  },
   rateLimitBuckets(result){
     const byId=result&&result.rateLimitsByLimitId;
     if(byId&&typeof byId==="object"){
@@ -779,7 +785,10 @@ async function loadThreads(){
   await loadProjects();
   await Promise.all(nextThreads.slice(0,60).map(t=>cwdOf(t.id).catch(()=>"")));
   if(generation!==threadsGeneration) return;
-  threads=nextThreads;
+  // thread/list is recency-ordered, so an active thread otherwise jumps around
+  // the sidebar on every turn. Keep existing rows stable and prepend only
+  // genuinely new threads.
+  threads=UIContracts.stableById(threads,nextThreads);
   const running=threads.filter(t=>isActive(t)).length;
   $("#nR").textContent=running?` ${running}`:"";
   $("#nD").textContent=threads.length?` ${threads.length-running}`:"";
@@ -831,12 +840,22 @@ async function loadAgents(){
     rows=res.flat();
   }
   if(cur!==parent) return;
-  agents=rows;
+  agents=UIContracts.stableById(agents,rows);
   $("#nA").textContent=agents.length?` ${agents.length}`:"";
   if(tab==="agents") renderList();
 }
 function label(t){ return t.name||nameCache[t.id]||t.preview||t.id.slice(0,8); }
+let renderedListFingerprint="";
+function listFingerprint(){
+  return JSON.stringify({tab,cur,
+    threads:threads.map(t=>[t.id,label(t),projOf(t.id),projRootOf(t.id),
+      (t.status||{}).type,(t.status||{}).activeFlags||[]]),
+    agents:agents.map(a=>[a.id,a.parentThreadId,agentLabel(a),agentKind(a)])});
+}
 function renderList(){
+  const fingerprint=listFingerprint();
+  if(fingerprint===renderedListFingerprint) return;
+  renderedListFingerprint=fingerprint;
   listEl.innerHTML="";
   let rows=threads;
   if(tab==="running") rows=threads.filter(t=>isActive(t));
@@ -956,10 +975,11 @@ function row(t, labelOverride){
    model/list. Hardcoding a scale is wrong: gpt-5.6-sol defaults to "low" and
    supports up to "ultra", while gpt-5.4 tops out at "xhigh". */
 function modelById(id){ return models.find(m=>m.id===id)||null; }
-function effortOptions(modelId, sel, withDefaultLabel){
-  const m=modelById(modelId)||modelById(defaultModel)||models[0];
+function effortOptions(modelId, sel, withDefaultLabel, effectiveDefault){
+  const m=modelById(modelId)||modelById(defaultModel)||null;
   const list=(m&&m.supportedReasoningEfforts)||[];
-  const def=(m&&m.defaultReasoningEffort)||"";
+  const def=effectiveDefault!==undefined?effectiveDefault:
+    ((m&&m.defaultReasoningEffort)||"");
   const el=$(sel); if(!el) return;
   const keep=el.value;
   el.innerHTML=`<option value="">${withDefaultLabel?("effort: default"+(def?" ("+def+")":"")):("default"+(def?" ("+def+")":""))}</option>`
@@ -1024,6 +1044,7 @@ function bucketHtml(bucket){
   }
   return html+`</div>`;
 }
+let renderedUsageHtml=null;
 async function loadUsage(){
   const r=await rpc("account/rateLimits/read",null,30);
   if(r.error||!r.result){
@@ -1038,11 +1059,16 @@ async function loadUsage(){
     note.title=message.slice(0,500); return;
   }
   const buckets=UIContracts.rateLimitBuckets(r.result);
-  if(!buckets.length){ $("#usage").innerHTML=""; return; }
+  if(!buckets.length){
+    if(renderedUsageHtml!=="") $("#usage").innerHTML="";
+    renderedUsageHtml=""; return;
+  }
   let html=buckets.map(bucketHtml).join("");
   const rc=((r.result||{}).rateLimitResetCredits)||{};
   if(rc.availableCount>0)
     html+=`<div class="note">${rc.availableCount} limit-reset credit(s) available</div>`;
+  if(html===renderedUsageHtml&&!$("#usage .usage-error")) return;
+  renderedUsageHtml=html;
   $("#usage").innerHTML=html;
 }
 
@@ -1070,6 +1096,9 @@ async function loadMeta(id){
     if(!response.ok) throw new Error(`metadata read failed (${response.status})`);
     const m=await response.json();
     if(cur!==id) return;
+    const fingerprint=JSON.stringify(m);
+    if(fingerprint===renderedMetaFingerprint) return;
+    renderedMetaFingerprint=fingerprint;
     curMeta=m;
     chip("#cModel", m.model?("model: "+m.model):null);
     const mm=modelById(m.model);
@@ -1087,8 +1116,8 @@ async function loadMeta(id){
     setDefault("#selModel","model: default",m.model);
     setDefault("#mModel","default",m.model);
     if(m.model){ defaultModel=m.model;
-      effortOptions(m.model,"#selEffort",true);
-      effortOptions(m.model,"#mEffort",false);
+      effortOptions(m.model,"#selEffort",true,m.reasoning_effort||"");
+      effortOptions(m.model,"#mEffort",false,m.reasoning_effort||"");
       tierOptions(m.model);
       // The first options describe resolved thread defaults. Do not turn those
       // defaults into explicit overrides or erase a choice made for the next
@@ -1103,6 +1132,7 @@ async function loadMeta(id){
   }catch(e){ curMeta={}; }
 }
 let curMeta={};
+let renderedMetaFingerprint="";
 function refreshMetaAfterTurnStart(id){
   // The state DB trails turn/start by a few milliseconds. One immediate read
   // can preserve stale chips for the entire turn, so retry on a short bounded
@@ -1282,6 +1312,7 @@ let openGeneration=0;
 async function open_(id){
   const generation=++openGeneration;
   cur=id; streamEl=null; reasonEl=null; curTurn=null;
+  renderedMetaFingerprint="";
   const r=await rpc("thread/resume",{threadId:id});
   const th=(r.result&&r.result.thread)||{};
 
@@ -1842,8 +1873,11 @@ es.onmessage=async ev=>{
     .map(m=>`<option value="${m.id}" title="${(m.description||"").replace(/"/g,"")}">${m.displayName||m.id}</option>`).join("");
   $("#mModel").innerHTML=`<option value="">default</option>`+opts;
   $("#selModel").innerHTML=`<option value="">model: default</option>`+opts;
-  effortOptions("", "#selEffort", true);
-  effortOptions("", "#mEffort", false);
+  // Until a thread is opened there is no effective default to display. Do not
+  // mislabel inheritance with whichever model happens to be first in the
+  // catalog (currently a low-effort model).
+  effortOptions("", "#selEffort", true, "");
+  effortOptions("", "#mEffort", false, "");
   tierOptions("");
   await loadThreads();
   loadAgents();
