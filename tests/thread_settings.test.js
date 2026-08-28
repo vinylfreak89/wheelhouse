@@ -315,3 +315,22 @@ test("a newly created thread shows its own settings, not the creating modal's",
     assert.match(ui.reads("#selEffort"), /low/);
     assert.match(ui.reads("#selAppr"), /on-request/);
   });
+
+test("a thread whose settings are not readable yet shows no other thread's values",
+  async () => {
+    // The state DB trails thread/start by milliseconds, so /threadmeta for a
+    // brand-new thread legitimately comes back empty (bridge.py _threadmeta
+    // returns {} when the row is not there yet).
+    const ui = harness({...THREADS, "thread-new": {}});
+
+    await ui.select("thread-a");
+    assert.match(ui.reads("#selEffort"), /high/);
+
+    await ui.select("thread-new");
+    assert.doesNotMatch(ui.reads("#selModel"), /model-x/,
+      "an unread thread must not inherit the previous thread's model");
+    assert.doesNotMatch(ui.reads("#selEffort"), /high/,
+      "an unread thread must not inherit the previous thread's effort");
+    assert.doesNotMatch(ui.reads("#selAppr"), /never/,
+      "an unread thread must not inherit the previous thread's approvals");
+  });

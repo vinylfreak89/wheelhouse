@@ -1193,20 +1193,23 @@ async function loadMeta(id){
     };
     setDefault("#selModel","model: default",m.model);
     setDefault("#mModel","default",m.model);
-    if(m.model){ defaultModel=m.model;
-      effortOptions(m.model,"#selEffort",true,m.reasoning_effort||"");
-      effortOptions(m.model,"#mEffort",false,m.reasoning_effort||"");
-      tierOptions(m.model);
-      // The first options describe resolved thread defaults. Do not turn those
-      // defaults into explicit overrides or erase a choice made for the next
-      // turn while this turn is paused on an approval.
-    }
+    // Rebuild for EVERY thread, including one whose model is not recorded yet:
+    // the state DB trails thread/start, so a freshly created thread reads back
+    // empty, and skipping the rebuild left it advertising the previously
+    // selected thread's efforts, tiers and resolved defaults as its own.
+    // The first options describe resolved thread defaults. Do not turn those
+    // defaults into explicit overrides or erase a choice made for the next
+    // turn while this turn is paused on an approval.
+    defaultModel=m.model||"";
+    effortOptions(defaultModel,"#selEffort",true,m.reasoning_effort||"");
+    effortOptions(defaultModel,"#mEffort",false,m.reasoning_effort||"");
+    tierOptions(defaultModel);
     const sbx=fmtSandbox(m.sandbox_policy);
     setDefault("#mSbx", $("#mSbx").options[0].value, null);
-    if(m.approval_mode){
-      const o=$("#selAppr").options[0];
-      const resolved=reviewer==="auto_review"?"auto-review":m.approval_mode;
-      if(o&&o.value==="") o.textContent="approvals: thread default ("+resolved+")";
+    const appr=$("#selAppr").options[0];
+    if(appr&&appr.value===""){
+      const resolved=reviewer==="auto_review"?"auto-review":(m.approval_mode||"");
+      appr.textContent="approvals: thread default"+(resolved?" ("+resolved+")":"");
     }
   }catch(e){ curMeta={}; }
 }
