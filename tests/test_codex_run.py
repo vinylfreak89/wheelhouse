@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -216,6 +217,8 @@ class ThreadResolutionTests(unittest.TestCase):
                 "roots": {self.cwd: "project"},
             }), encoding="utf-8")
             with mock.patch.object(codex_run, "REGISTRY", str(registry_path)), \
+                 mock.patch.object(codex_run, "claude_project",
+                                   return_value=self.cwd), \
                  mock.patch.object(codex_run, "chat_identity",
                                    return_value=("local-right", "Same title")):
                 codex_run.bind_project("right")
@@ -265,8 +268,9 @@ class ProjectRepairTests(unittest.TestCase):
 
             with mock.patch.object(codex_run, "REGISTRY", str(registry_path)), \
                  mock.patch.object(codex_run, "rpc", side_effect=fake_rpc), \
-                 mock.patch.object(codex_run, "chat_identity",
-                                   return_value=("callers-chat", "Caller")):
+                 mock.patch.object(codex_run, "claude_project",
+                                   side_effect=lambda path, prefer_session=False:
+                                   "/original/project"):
                 fixed, skipped = codex_run.repair_projects()
 
             self.assertEqual((fixed, skipped), (1, []))
@@ -298,6 +302,25 @@ class ProjectRepairTests(unittest.TestCase):
             self.assertEqual((fixed, skipped), (0, ["legacy"]))
             saved = json.loads(registry_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["threads"], {})
+
+    def test_project_alias_targets_claude_root_not_runtime_cwd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry_path = Path(temp) / "projects.json"
+            registry_path.write_text(json.dumps({
+                "threads": {"t": {"root": "/project", "name": "project"}},
+                "roots": {}, "chats": {},
+            }), encoding="utf-8")
+            with mock.patch.object(codex_run, "REGISTRY", str(registry_path)), \
+                 mock.patch.object(codex_run, "project_cwd",
+                                   return_value="/project/runtime/subdir"), \
+                 mock.patch.object(codex_run, "claude_project",
+                                   return_value="/project"), \
+                 mock.patch.object(sys, "argv",
+                                   ["codex-run", "project", "--name", "Alias"]):
+                codex_run.main()
+            saved = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["roots"], {"/project": "Alias"})
+            self.assertEqual(saved["threads"]["t"]["name"], "Alias")
 
 
 class ApprovalDefaultTests(unittest.TestCase):

@@ -286,9 +286,11 @@ first write failed".*
 
 ### `--cwd` moves the writes, NOT the conversation
 
-A thread's project is **pinned once**, when `codex-run` first creates or
-resolves it, and nothing a turn does can move it. This is automatic — if you go
-through the CLI there is nothing to remember.
+A thread's project comes from **Claude's registered project root and the
+driving chat's persisted origin**, never from Codex's runtime `cwd`. A turn can
+work in another checkout without moving the conversation. UI-created threads
+without a Claude chat binding are resolved from their immutable rollout
+creation path to the longest registered Claude project ancestor.
 
     codex-run project              # name, root, and this chat's pinned thread
     codex-run project --name NAME  # override (two checkouts, same basename)
@@ -302,9 +304,10 @@ time, including on a thread mid-turn.
 If you touch that code path, keep the property and test it by exercising it —
 rename, re-resolve, assert the id is unchanged.
 
-The displayed project name is an independent registry field. The project
-root's basename is only its initial default; `project --name` sets it
-explicitly. Never derive project identity from a turn's mutable `cwd`.
+The displayed project name is an independent registry field. The authoritative
+root comes from Claude's project registry; its basename is the initial label,
+and `project --name` can override that label. Never derive either project
+identity or its default name from a turn's mutable `cwd`.
 
 ## Effort is a budget decision, not a default
 

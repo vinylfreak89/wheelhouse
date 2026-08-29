@@ -14,6 +14,7 @@ import sys
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 import bridge
+import project_registry
 
 
 class FakeProcess:
@@ -228,6 +229,70 @@ class HandlerContractTests(unittest.TestCase):
             self.assertEqual(data["cwd"], "/work/project")
             self.assertEqual(data["project"], "(unassigned)")
             self.assertEqual(data["project_root"], "")
+
+    def test_projects_resolve_from_claude_roots_not_runtime_cwd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            codex_state = home / ".codex"
+            codex_state.mkdir()
+            tos_root = home / "Documents" / "tos-performance"
+            blackmagic_root = home / "Documents" / "blackmagic-usb-mac"
+            tos_root.mkdir(parents=True)
+            blackmagic_root.mkdir(parents=True)
+            (home / ".claude.json").write_text(json.dumps({
+                "projects": {str(tos_root): {}, str(blackmagic_root): {}},
+            }), encoding="utf-8")
+
+            tos_rollout = home / "tos.jsonl"
+            tos_rollout.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {"cwd": str(tos_root / "ToS GPU render pipeline")},
+            }) + "\n", encoding="utf-8")
+            blackmagic_rollout = home / "blackmagic.jsonl"
+            blackmagic_rollout.write_text(json.dumps({
+                "type": "session_meta", "payload": {"cwd": str(blackmagic_root)},
+            }) + "\n", encoding="utf-8")
+
+            database = codex_state / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)"
+            )
+            connection.executemany("INSERT INTO threads VALUES (?, ?, ?)", [
+                ("tos", str(tos_rollout), str(tos_root / "runtime")),
+                ("blackmagic", str(blackmagic_rollout), "/unrelated/runtime"),
+            ])
+            connection.commit()
+            connection.close()
+
+            registry = home / "projects.json"
+            registry.write_text(json.dumps({
+                "threads": {"tos": {
+                    "root": str(tos_root / "ToS GPU render pipeline"),
+                    "name": "ToS GPU render pipeline",
+                    "chat_id": "local-tos",
+                }},
+                "roots": {}, "chats": {"local-tos": "tos"},
+            }), encoding="utf-8")
+            request, sent = handler("/projects")
+            request.REGISTRY = str(registry)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}), \
+                 mock.patch.object(project_registry, "CLAUDE_CONFIG",
+                                   str(home / ".claude.json")):
+                request._projects()
+            data = json.loads(sent[0][1])
+
+            self.assertEqual(data["threads"]["tos"], {
+                "root": str(tos_root), "name": "tos-performance",
+                "chat_id": "local-tos",
+            })
+            self.assertEqual(data["threads"]["blackmagic"], {
+                "root": str(blackmagic_root), "name": "blackmagic-usb-mac",
+            })
+            # Runtime discovery is intentionally read-only; it cannot race a
+            # CLI chat binding and lose fields from the persisted registry.
+            saved = json.loads(registry.read_text(encoding="utf-8"))
+            self.assertNotIn("blackmagic", saved["threads"])
 
 
 class AppServerFramingTests(unittest.TestCase):

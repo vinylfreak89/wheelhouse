@@ -101,20 +101,24 @@ one thread implicitly selected for that chat.
 No `[project]` prefix: the sidebar already groups by the project pin, so the
 prefix is redundant.
 
-**Where the project pin lives.** A thread's project is pinned in
-`<repo>/state/projects.json`. The bridge serves that at `/projects`, and the
-sidebar groups on it — not on `threads.cwd`, which a turn can change.
+**Where project identity comes from.** Claude's registered roots in
+`~/.claude.json` are authoritative. A Claude-driven thread resolves through its
+persisted Claude session origin; a UI-created thread resolves its immutable
+rollout creation path to the longest registered ancestor. `state/projects.json`
+keeps chat bindings and explicit label overrides, and the bridge serves the
+resolved view at `/projects`. The sidebar never groups on `threads.cwd`, which
+a turn can change.
 
 **Project name and root are separate.** The registry stores the displayed name
 independently from the project root and from a thread's mutable cwd. The root's
 basename is only the initial default. `codex-run project --name` sets an
 explicit label; the sidebar shows that label and keeps the root in the tooltip.
 
-**Legacy repair is conservative.** `codex-run project --repair` reads the
-creation cwd from each rollout's immutable `session_meta`; it never consults the
-thread's current cwd. Bulk repair also leaves chat ownership unset because the
-one chat driving the repair cannot own every repaired thread. The owning chat
-adds its stable identity lazily when it next resolves that thread.
+**Legacy repair is conservative.** `codex-run project --repair` maps each
+rollout's immutable creation path to a registered Claude project; it never
+consults the thread's current cwd. Bulk repair also leaves chat ownership unset
+because the one chat driving the repair cannot own every repaired thread. The
+owning chat adds its stable identity lazily when it next resolves that thread.
 
 ---
 

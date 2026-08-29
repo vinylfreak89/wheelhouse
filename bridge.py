@@ -19,6 +19,7 @@ thread, so Claude can steer a turn the UI is watching (`turn/steer`).
 """
 import json, os, queue, re, shutil, sqlite3, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from project_registry import reconcile_projects
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UI_DIR = os.path.join(HERE, "ui")
@@ -433,8 +434,28 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _discover_projects(self, reg):
+        """Resolve UI-created threads from Claude's registry and rollouts.
+
+        Discovery is read-only. The bridge and CLI are separate processes; a
+        GET handler rewriting their shared registry could lose a concurrent
+        chat binding. Claude's registry plus immutable rollout metadata are the
+        authority, so recalculating these fields is both safer and sufficient.
+        """
+        records = []
+        db = os.path.expanduser("~/.codex/state_5.sqlite")
+        try:
+            connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            records = [dict(zip(("id", "rollout_path"), row)) for row in
+                       connection.execute("SELECT id,rollout_path FROM threads")]
+            connection.close()
+        except Exception:
+            pass
+        reconcile_projects(reg, records)
+        return reg
+
     def _projects(self):
-        reg = self._registry()
+        reg = self._discover_projects(self._registry())
         reg["defaultCwd"] = (os.environ.get("CODEX_DEFAULT_CWD")
                              or os.path.expanduser("~"))
         return self._send(200, json.dumps(reg).encode())
@@ -466,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
             c.close()
         except Exception as e:
             out = {"error": str(e)}
-        pin = (self._registry().get("threads") or {}).get(tid)
+        pin = (self._discover_projects(self._registry()).get("threads") or {}).get(tid)
         if pin:
             out["project"] = pin.get("name")
             out["project_root"] = pin.get("root")

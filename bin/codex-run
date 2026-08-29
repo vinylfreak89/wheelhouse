@@ -58,6 +58,9 @@ ROOT = os.environ.get("CODEX_APP_DIR") or os.path.dirname(
     os.path.dirname(os.path.realpath(__file__)))
 APP = os.path.join(ROOT, "Wheelhouse.app")
 BRIDGE_PY = os.path.join(ROOT, "bridge.py")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from project_registry import project_for_path, project_label, rollout_creation_cwd
 
 
 def _req(path, obj=None, timeout=300):
@@ -177,6 +180,29 @@ def _claude_sessions():
             yield session
 
 
+def chat_session():
+    """Return the driving Claude session record, when discoverable."""
+    sessions = list(_claude_sessions())
+    hints = [v for v in (
+        os.environ.get("CLAUDE_CODE_HOST_SESSION_ID"),
+        os.environ.get("CLAUDE_CODE_SESSION_ID"),
+    ) if v]
+    for hint in hints:
+        for session in sessions:
+            if hint in (session.get("sessionId"), session.get("cliSessionId")):
+                return session
+    if hints:
+        return {"sessionId": hints[0]}
+
+    here = os.path.abspath(os.getcwd())
+    candidates = []
+    for session in sessions:
+        cwd = os.path.abspath(session.get("cwd") or session.get("originCwd") or "")
+        if cwd == here and session.get("title"):
+            candidates.append(session)
+    return max(candidates, key=_session_recency) if candidates else None
+
+
 def chat_identity():
     """Return ``(stable session id, title)`` for the driving Claude chat.
 
@@ -188,36 +214,19 @@ def chat_identity():
     Direct terminal use has no Claude session environment. Preserve the old
     cwd/recency lookup there as a best-effort fallback.
     """
-    sessions = list(_claude_sessions())
-    hints = [v for v in (
-        # HOST_SESSION_ID is the desktop record's canonical sessionId; the
-        # other value is its cliSessionId on current Claude Code builds.
-        os.environ.get("CLAUDE_CODE_HOST_SESSION_ID"),
-        os.environ.get("CLAUDE_CODE_SESSION_ID"),
-    ) if v]
-    for hint in hints:
-        for session in sessions:
-            if hint not in (session.get("sessionId"), session.get("cliSessionId")):
-                continue
-            stable = session.get("sessionId") or session.get("cliSessionId") or hint
-            return stable, session.get("title")
-
-    # The environment id remains a useful stable binding even if Claude has not
-    # flushed its session JSON yet. The display name can fall back separately.
-    if hints:
-        return hints[0], None
-
-    here = os.path.abspath(os.getcwd())
-    candidates = []
-    for session in sessions:
-        cwd = os.path.abspath(session.get("cwd") or session.get("originCwd") or "")
-        if cwd == here and session.get("title"):
-            candidates.append(session)
-    if not candidates:
+    session = chat_session()
+    if not session:
         return None, None
-    session = max(candidates, key=_session_recency)
     stable = session.get("sessionId") or session.get("cliSessionId")
     return stable, session.get("title")
+
+
+def claude_project(source_path=None, prefer_session=True):
+    """Resolve a project from Claude's registry, never from mutable Codex cwd."""
+    session = chat_session() if prefer_session else None
+    source = ((session or {}).get("originCwd") or (session or {}).get("cwd")
+              or source_path)
+    return project_for_path(source)
 
 
 def chat_title():
@@ -238,19 +247,14 @@ def default_name(cwd=None):
 
 
 def project_cwd(explicit=None):
-    """Return the requested working directory.
-
-    At thread creation this is also the default project root. Once the project
-    binding exists, later working-directory changes must not alter it.
-    """
+    """Return the requested runtime working directory, never project identity."""
     return os.path.abspath(explicit or os.environ.get("CODEX_CWD") or os.getcwd())
 
 
 # ---------------------------------------------------------------- projects
-# A thread belongs to a PROJECT. That binding is made once, when the thread is
-# created, and nothing may move it afterwards -- in particular not a turn's
-# --cwd, which Codex persists into threads.cwd and which the sidebar was
-# grouping on. Writing work into another directory is routine; it must not
+# A thread belongs to a Claude PROJECT. That identity comes from Claude's own
+# registered project roots and the driving chat's persisted origin, never from
+# Codex's mutable runtime cwd. Writing work elsewhere is routine and must not
 # relocate the conversation.
 REGISTRY = os.path.join(ROOT, "state", "projects.json")
 
@@ -291,20 +295,23 @@ def project_name(root=None):
     named = _registry()["roots"].get(root)
     if named:
         return named
-    return os.path.basename(root.rstrip("/")) or "codex"
+    return project_label(root)
 
 
 def bind_project(tid, root=None, name=None, capture_chat=True):
-    """Pin a thread to a project. First binding wins unless a name is forced."""
-    root = os.path.abspath(root or project_cwd())
+    """Pin a thread to the project registered by Claude for its source path."""
+    source = os.path.abspath(root or project_cwd())
+    discovered = claude_project(source, prefer_session=capture_chat)
+    if not discovered and not name:
+        return None
+    root = discovered or source
     reg = _registry()
     if name:
         reg["roots"][root] = name
-    entry = reg["threads"].get(tid)
-    if entry is None or name:
-        entry = {"root": (entry or {}).get("root", root) if not name else root,
-                 "name": name or reg["roots"].get(root) or project_name(root)}
-        reg["threads"][tid] = entry
+    entry = reg["threads"].get(tid) or {}
+    entry = {**entry, "root": root,
+             "name": name or reg["roots"].get(root) or project_name(root)}
+    reg["threads"][tid] = entry
     # Bulk legacy repair is not being driven by each repaired thread's owning
     # chat. Stamping the current chat onto all of them cross-wires identity, so
     # only normal create/reuse paths capture the caller's chat.
@@ -338,20 +345,7 @@ def thread_origin_cwd(tid):
     path = thread.get("path") or thread.get("rolloutPath")
     if not path:
         return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    record = json.loads(line)
-                except Exception:
-                    continue
-                if record.get("type") != "session_meta":
-                    continue
-                cwd = (record.get("payload") or {}).get("cwd")
-                return os.path.abspath(cwd) if cwd else None
-    except OSError:
-        return None
-    return None
+    return rollout_creation_cwd(path)
 
 
 def repair_projects():
@@ -365,14 +359,15 @@ def repair_projects():
     skipped = []
     for thread in rpc("thread/list", {"limit": 200}, 40).get("data", []):
         tid = thread["id"]
-        if project_of(tid):
-            continue
-        root = thread_origin_cwd(tid)
+        source = thread_origin_cwd(tid)
+        root = claude_project(source, prefer_session=False)
         if not root:
             skipped.append(tid)
             continue
-        bind_project(tid, root, capture_chat=False)
-        fixed += 1
+        before = project_of(tid)
+        after = bind_project(tid, source, capture_chat=False)
+        if after != before:
+            fixed += 1
     return fixed, skipped
 
 
@@ -483,6 +478,7 @@ def find_thread(name, cwd=None):
     Falls back to name matching for threads that predate the registry.
     """
     want_cwd = project_cwd(cwd)
+    want_project = claude_project(want_cwd) or want_cwd
     want_chat_id, want_title = chat_identity()
     expected_default = (want_title
                         or os.path.basename(want_cwd.rstrip("/"))
@@ -530,7 +526,7 @@ def find_thread(name, cwd=None):
     # Never use this path for an entry already bound to a different stable id.
     if automatic_name:
         for tid, entry in reg.items():
-            if tid not in live or entry.get("root") != want_cwd:
+            if tid not in live or entry.get("root") != want_project:
                 continue
             if entry.get("chat_id") or entry.get("chat") != name:
                 continue
@@ -544,7 +540,8 @@ def find_thread(name, cwd=None):
             continue
         binding = reg.get(tid) or {}
         pinned = binding.get("root")
-        if (pinned or t.get("cwd") or want_cwd) != want_cwd:
+        legacy_project = claude_project(t.get("cwd"), prefer_session=False)
+        if (pinned or legacy_project or t.get("cwd") or want_project) != want_project:
             continue
         # A cosmetic name collision must not cross an existing chat binding.
         bound_chat_id = binding.get("chat_id")
@@ -792,12 +789,15 @@ def main():
         else:
             sys.exit("lock status|acquire [owner] [note]|release")
     elif c == "project":
+        root = claude_project(project_cwd())
+        if not root:
+            sys.exit("current path is not inside a project registered by Claude")
         if "--name" in a:
             nm = a[a.index("--name") + 1]
             reg = _registry()
-            reg["roots"][project_cwd()] = nm       # the root is the real subject
+            reg["roots"][root] = nm
             for tid, e in reg["threads"].items():
-                if e.get("root") == project_cwd():
+                if e.get("root") == root:
                     e["name"] = nm
             _registry_save(reg)
             print(f"project name set: {nm}")
@@ -807,7 +807,6 @@ def main():
             if skipped:
                 print(f"skipped {len(skipped)} without creation metadata")
         else:
-            root = project_cwd()
             print(f"name : {project_name(root)}")
             print(f"root : {root}")
             tid = find_thread(default_name())
