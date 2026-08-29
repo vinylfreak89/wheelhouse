@@ -444,6 +444,24 @@ const UIContracts=Object.freeze({
     return entries.findIndex(entry=>entry.threadId===threadId&&entry.text===text&&
       nowMs-entry.at>=0&&nowMs-entry.at<=maxAgeMs);
   },
+  optimisticEchoesMissingFromTranscript(entries,{threadId,rows}){
+    // A navigation replaces the whole DOM. Preserve local sends that have not
+    // reached the rollout yet, but do not duplicate sends already present in
+    // that authoritative snapshot. Counts matter when identical text is sent
+    // more than once.
+    const present=new Map();
+    for(const row of rows||[]){
+      if(row.cls!=="user") continue;
+      present.set(row.text,(present.get(row.text)||0)+1);
+    }
+    const missing=[];
+    for(const entry of entries||[]){
+      if(entry.threadId!==threadId) continue;
+      const count=present.get(entry.text)||0;
+      if(count) present.set(entry.text,count-1); else missing.push(entry);
+    }
+    return missing;
+  },
   resetCountdown(resetsAt,nowMs=Date.now()){
     if(!resetsAt) return "";
     const remainingMs=resetsAt*1000-nowMs;
@@ -698,72 +716,59 @@ function textOf(it){
   if(typeof it.message==="string") return it.message;
   return "";
 }
-function upsertItem(it,cls,who,text,ts){
-  const key=it.id||it.itemId;
-  if(key&&itemEls[key]){
-    const item=itemEls[key], body=item.querySelector(".body");
-    return UIContracts.mutatePreservingTail(logEl,()=>{
-      item.className="msg "+cls;
-      item.querySelector(".who span").textContent=who;
-      body.classList.remove("md"); delete body.dataset.raw;
-      body.textContent=text||"";
-      if((cls==="agent"||cls==="rsn")&&text){
-        body.dataset.raw=text; renderMd(body);
-      }
-      return body;
-    });
-  }
-  const body=add(cls,who,text,ts);
-  if(key) itemEls[key]=body.parentElement;
-  return body;
-}
 function renderItem(it,ts){
   const ty=String(it.type||it.itemType||"");
-  if(/^user/i.test(ty)) return upsertItem(it,"user","you",
-    textOf(it)||JSON.stringify(it).slice(0,600),ts);
+  if(/^user/i.test(ty)) return add("user","you",textOf(it)||JSON.stringify(it).slice(0,600),ts);
   if(/agentMessage|agent_message/i.test(ty)){
     const ph=it.phase||"";   // commentary = thinking aloud, final_answer = the result
-    return upsertItem(it,ph==="commentary"?"rsn":"agent",
-                      ph==="commentary"?"codex \u00b7 thinking":"codex",
-                      textOf(it),ts);
+    return add(ph==="commentary"?"rsn":"agent",
+               ph==="commentary"?"codex \u00b7 thinking":"codex", textOf(it), ts);
   }
-  if(/reasoning/i.test(ty)){
-    const t=textOf(it); return (t||it.id||it.itemId)
-      ?upsertItem(it,"rsn","thinking",t,ts):null;
-  }
+  if(/reasoning/i.test(ty)){ const t=textOf(it); return t?add("rsn","thinking",t,ts):null; }
   if(/commandExecution|exec/i.test(ty)){
     const cmd=it.command||it.commandLine||(it.parsedCmd&&JSON.stringify(it.parsedCmd))||"";
     const out=it.aggregatedOutput||it.output||it.stdout||"";
     const st=it.status||it.exitCode;
     const text="$ "+String(cmd)+(out?"\n\n"+String(out).slice(0,6000):"");
-    return upsertItem(it,"cmd",
-      "command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts);
+    const key=it.id||it.itemId;
+    // item/started then item/completed arrive for the SAME command -- update
+    // that row in place. Other item kinds stay invisible until content exists.
+    if(key&&itemEls[key]){
+      const item=itemEls[key], body=item.querySelector(".body");
+      return UIContracts.mutatePreservingTail(logEl,()=>{
+        body.textContent=text;
+        item.querySelector(".who span").textContent=
+          "command"+(st!==undefined&&st!==null?" \u00b7 "+st:"");
+        return body;
+      });
+    }
+    const body=add("cmd","command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts);
+    if(key) itemEls[key]=body.parentElement;
+    return body;
   }
   if(/fileChange|patch|applyPatch/i.test(ty)){
     const f=(it.changes||it.files||[]).map?.(x=>x.path||x).join("\n")||JSON.stringify(it).slice(0,900);
-    return upsertItem(it,"tool","file change",f,ts);
+    return add("tool","file change",f,ts);
   }
   if(/webSearch/i.test(ty)){
     const q=it.query||it.q||(it.action&&it.action.query)||"";
     const n=(it.results||it.sources||[]).length;
-    return upsertItem(it,"tool","web search",
-      q?(q+(n?`\n\n${n} result(s)`:"")):JSON.stringify(it).slice(0,400),ts);
+    return add("tool","web search", q?(q+(n?`\n\n${n} result(s)`:"")):JSON.stringify(it).slice(0,400), ts);
   }
   if(/mcp|toolCall|dynamicTool/i.test(ty)){
     const nm=it.toolName||it.name||it.tool||"tool";
     const args=it.arguments||it.args||it.input;
-    return upsertItem(it,"tool",String(nm),
-      args?(typeof args==="string"?args:JSON.stringify(args,null,1)).slice(0,1200):"",ts);
+    return add("tool",String(nm),
+      args?(typeof args==="string"?args:JSON.stringify(args,null,1)).slice(0,1200):"", ts);
   }
   if(/todo|plan/i.test(ty)){
     const items=(it.items||it.todos||[]);
-    if(items.length) return upsertItem(it,"tool","plan",
-      items.map(x=>`${x.status==="completed"?"[x]":x.status==="inProgress"?"[~]":"[ ]"} ${x.text||x.title||x}`).join("\n"),ts);
+    if(items.length) return add("tool","plan",
+      items.map(x=>`${x.status==="completed"?"[x]":x.status==="inProgress"?"[~]":"[ ]"} ${x.text||x.title||x}`).join("\n"), ts);
   }
-  if(/error/i.test(ty)) return upsertItem(it,"err",ty,
-    textOf(it)||JSON.stringify(it).slice(0,600),ts);
+  if(/error/i.test(ty)) return add("err",ty,textOf(it)||JSON.stringify(it).slice(0,600),ts);
   // unknown item type: show the type plainly, payload collapsed
-  return upsertItem(it,"tool",ty||"item",JSON.stringify(it,null,1).slice(0,900),ts);
+  return add("tool",ty||"item",JSON.stringify(it,null,1).slice(0,900),ts);
 }
 
 /* ---------- protocol pane ---------- */
@@ -1416,6 +1421,13 @@ function renderTranscript(rows,{atEnd=true,scrollTop=0}={}){
       }
       add(row.cls, row.who, row.text, isNaN(ms)?null:ms);
     }
+    // Local sends are drawn optimistically before app-server has necessarily
+    // appended them to the rollout. Rebuild those rows after navigation; the
+    // later item/completed event will consume the same pending echo normally.
+    for(const entry of UIContracts.optimisticEchoesMissingFromTranscript(
+      optimisticUserEchoes,{threadId:cur,rows})){
+      add("user",entry.who,entry.text,entry.at);
+    }
   } finally {
     replaying=false;
     logTarget=logEl;
@@ -1526,7 +1538,7 @@ bindModal();
 /* ---------- send ---------- */
 const optimisticUserEchoes=[];
 function addOptimisticUser(threadId,text,who){
-  const entry={threadId,text,at:Date.now()};
+  const entry={threadId,text,who,at:Date.now()};
   optimisticUserEchoes.push(entry);
   add("user",who,text);
   return entry;
@@ -1966,34 +1978,21 @@ es.onmessage=async ev=>{
   }
   else if(meth==="item/agentMessage/delta"){
     const stick=atBottom();
-    const key=p.itemId||(p.item&&p.item.id);
-    if(key&&itemEls[key]) streamEl=itemEls[key].querySelector(".body");
-    if(!streamEl){ streamEl=add("agent","codex","");
-      if(key) itemEls[key]=streamEl.parentElement; }
+    if(!streamEl) streamEl=add("agent","codex","");
     streamEl.dataset.raw=(streamEl.dataset.raw||"")+(p.delta??p.text??"");
     streamEl.textContent=streamEl.dataset.raw;   // plain while streaming: half-written
     if(stick) logEl.scrollTop=logEl.scrollHeight; // markdown renders wrong mid-token
   }
   else if(/reasoning.*delta/i.test(meth||"")){
     const stick=atBottom();
-    const key=p.itemId||(p.item&&p.item.id);
-    if(key&&itemEls[key]) reasonEl=itemEls[key].querySelector(".body");
-    if(!reasonEl){ reasonEl=add("rsn","thinking","");
-      if(key) itemEls[key]=reasonEl.parentElement; }
+    if(!reasonEl) reasonEl=add("rsn","thinking","");
     reasonEl.dataset.raw=(reasonEl.dataset.raw||"")+(p.delta??p.text??"");
     reasonEl.textContent=reasonEl.dataset.raw;
     if(stick) logEl.scrollTop=logEl.scrollHeight;
   }
   else if(meth==="item/started"){
-    const it=p.item||{}, ty=String(it.type||"");
-    // Reserve the item's DOM position at START, then update that same node at
-    // completion. Appending tools only when they finished let later streamed
-    // prose overtake slow tools and made a serial protocol look out of order.
-    if(!/^user/i.test(ty)){
-      const body=renderItem(it);
-      if(/agentMessage|agent_message/i.test(ty)) streamEl=body;
-      else if(/reasoning/i.test(ty)) reasonEl=body;
-    }
+    const ty=String((p.item||{}).type||"");
+    if(/commandExecution|exec/i.test(ty)) renderItem(p.item);
   }
   else if(meth==="item/completed"){
     const it=p.item||{}; const ty=String(it.type||"");
@@ -2006,17 +2005,11 @@ es.onmessage=async ev=>{
       return;
     }
     if(/agentMessage|agent_message/i.test(ty)){
-      const stick=atBottom(), key=it.id||it.itemId;
-      const body=(key&&itemEls[key]&&itemEls[key].querySelector(".body"))||streamEl;
-      if(textOf(it)) renderItem(it); else renderMd(body);
-      if(streamEl===body) streamEl=null;
+      const stick=atBottom(); renderMd(streamEl); streamEl=null;
       if(stick) logEl.scrollTop=logEl.scrollHeight;
     }
     else if(/reasoning/i.test(ty)){
-      const stick=atBottom(), key=it.id||it.itemId;
-      const body=(key&&itemEls[key]&&itemEls[key].querySelector(".body"))||reasonEl;
-      if(textOf(it)) renderItem(it); else renderMd(body);
-      if(reasonEl===body) reasonEl=null;
+      const stick=atBottom(); renderMd(reasonEl); reasonEl=null;
       if(stick) logEl.scrollTop=logEl.scrollHeight;
     }
     else renderItem(it);

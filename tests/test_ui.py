@@ -276,18 +276,19 @@ class UiStaticTests(unittest.TestCase):
                       completed)
         self.assertNotIn("already shown when we sent it", completed)
 
-    def test_live_items_reserve_protocol_order_before_they_complete(self):
-        render = self.html.split("function upsertItem", 1)[1].split(
-            "/* ---------- protocol pane", 1)[0]
-        self.assertIn("if(key&&itemEls[key])", render)
-        self.assertIn("itemEls[key]=body.parentElement", render)
+    def test_navigation_rebuilds_uncommitted_user_echoes(self):
+        render = self.html.split("function renderTranscript", 1)[1].split(
+            "let openGeneration", 1)[0]
+        self.assertIn("optimisticEchoesMissingFromTranscript", render)
+        self.assertIn('add("user",entry.who,entry.text,entry.at)', render)
+
+    def test_live_item_start_does_not_render_empty_transient_rows(self):
         events = self.html.split('else if(meth==="item/started")', 1)[1].split(
             'else if(meth==="item/completed")', 1)[0]
-        self.assertIn("const body=renderItem(it)", events)
-        self.assertNotIn("if(/commandExecution|exec/i.test(ty))", events)
-        completed = self.html.split('else if(meth==="item/completed")', 1)[1].split(
-            "else if(/^thread", 1)[0]
-        self.assertIn("if(textOf(it)) renderItem(it)", completed)
+        self.assertIn("if(/commandExecution|exec/i.test(ty)) renderItem(p.item)", events)
+        self.assertNotIn("reasonEl=", events)
+        self.assertNotIn("streamEl=", events)
+        self.assertNotIn("renderItem(it)", events)
 
     def test_removed_transcript_cache_hook_is_not_called(self):
         self.assertNotIn("txUpdateLast", self.html)

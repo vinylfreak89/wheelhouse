@@ -243,6 +243,26 @@ test("only a matching recent local user message is treated as an echo", () => {
   }), -1);
 });
 
+test("navigation preserves only optimistic user messages absent from the rollout", () => {
+  const entries = [
+    {threadId: "thread-1", text: "saved", who: "you", at: 1000},
+    {threadId: "thread-1", text: "duplicate", who: "you (steer)", at: 1001},
+    {threadId: "thread-1", text: "duplicate", who: "you (steer)", at: 1002},
+    {threadId: "thread-2", text: "other thread", who: "you", at: 1003},
+  ];
+  const missing = contracts.optimisticEchoesMissingFromTranscript(entries, {
+    threadId: "thread-1",
+    rows: [
+      {cls: "user", text: "saved"},
+      {cls: "user", text: "duplicate"},
+      {cls: "agent", text: "not a user echo"},
+    ],
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(missing)), [
+    {threadId: "thread-1", text: "duplicate", who: "you (steer)", at: 1002},
+  ]);
+});
+
 test("reset countdown carries rounded minutes into hours", () => {
   assert.equal(contracts.resetCountdown(17999, 0), "5h");
   assert.equal(contracts.resetCountdown(3599, 0), "1h");
