@@ -698,62 +698,72 @@ function textOf(it){
   if(typeof it.message==="string") return it.message;
   return "";
 }
+function upsertItem(it,cls,who,text,ts){
+  const key=it.id||it.itemId;
+  if(key&&itemEls[key]){
+    const item=itemEls[key], body=item.querySelector(".body");
+    return UIContracts.mutatePreservingTail(logEl,()=>{
+      item.className="msg "+cls;
+      item.querySelector(".who span").textContent=who;
+      body.classList.remove("md"); delete body.dataset.raw;
+      body.textContent=text||"";
+      if((cls==="agent"||cls==="rsn")&&text){
+        body.dataset.raw=text; renderMd(body);
+      }
+      return body;
+    });
+  }
+  const body=add(cls,who,text,ts);
+  if(key) itemEls[key]=body.parentElement;
+  return body;
+}
 function renderItem(it,ts){
   const ty=String(it.type||it.itemType||"");
-  if(/^user/i.test(ty)) return add("user","you",textOf(it)||JSON.stringify(it).slice(0,600),ts);
+  if(/^user/i.test(ty)) return upsertItem(it,"user","you",
+    textOf(it)||JSON.stringify(it).slice(0,600),ts);
   if(/agentMessage|agent_message/i.test(ty)){
     const ph=it.phase||"";   // commentary = thinking aloud, final_answer = the result
-    return add(ph==="commentary"?"rsn":"agent",
-               ph==="commentary"?"codex \u00b7 thinking":"codex", textOf(it), ts);
+    return upsertItem(it,ph==="commentary"?"rsn":"agent",
+                      ph==="commentary"?"codex \u00b7 thinking":"codex",
+                      textOf(it),ts);
   }
-  if(/reasoning/i.test(ty)){ const t=textOf(it); return t?add("rsn","thinking",t,ts):null; }
+  if(/reasoning/i.test(ty)){
+    const t=textOf(it); return (t||it.id||it.itemId)
+      ?upsertItem(it,"rsn","thinking",t,ts):null;
+  }
   if(/commandExecution|exec/i.test(ty)){
     const cmd=it.command||it.commandLine||(it.parsedCmd&&JSON.stringify(it.parsedCmd))||"";
     const out=it.aggregatedOutput||it.output||it.stdout||"";
     const st=it.status||it.exitCode;
     const text="$ "+String(cmd)+(out?"\n\n"+String(out).slice(0,6000):"");
-    const key=it.id||it.itemId;
-    // item/started then item/completed arrive for the SAME item -- update in
-    // place instead of appending a second block.
-    if(key&&itemEls[key]){
-      const item=itemEls[key], body=item.querySelector(".body");
-      return UIContracts.mutatePreservingTail(logEl,()=>{
-        const who2="command"+(st!==undefined&&st!==null?" \u00b7 "+st:"");
-        body.textContent=text;
-        item.querySelector(".who span").textContent=who2;
-        return body;
-      });
-    }
-    const stick=atBottom();
-    const b=add("cmd","command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts);
-    if(key){ itemEls[key]=b.parentElement;
-             }
-    if(stick) logEl.scrollTop=logEl.scrollHeight;
-    return b;
+    return upsertItem(it,"cmd",
+      "command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts);
   }
   if(/fileChange|patch|applyPatch/i.test(ty)){
     const f=(it.changes||it.files||[]).map?.(x=>x.path||x).join("\n")||JSON.stringify(it).slice(0,900);
-    return add("tool","file change",f,ts);
+    return upsertItem(it,"tool","file change",f,ts);
   }
   if(/webSearch/i.test(ty)){
     const q=it.query||it.q||(it.action&&it.action.query)||"";
     const n=(it.results||it.sources||[]).length;
-    return add("tool","web search", q?(q+(n?`\n\n${n} result(s)`:"")):JSON.stringify(it).slice(0,400), ts);
+    return upsertItem(it,"tool","web search",
+      q?(q+(n?`\n\n${n} result(s)`:"")):JSON.stringify(it).slice(0,400),ts);
   }
   if(/mcp|toolCall|dynamicTool/i.test(ty)){
     const nm=it.toolName||it.name||it.tool||"tool";
     const args=it.arguments||it.args||it.input;
-    return add("tool",String(nm),
-      args?(typeof args==="string"?args:JSON.stringify(args,null,1)).slice(0,1200):"", ts);
+    return upsertItem(it,"tool",String(nm),
+      args?(typeof args==="string"?args:JSON.stringify(args,null,1)).slice(0,1200):"",ts);
   }
   if(/todo|plan/i.test(ty)){
     const items=(it.items||it.todos||[]);
-    if(items.length) return add("tool","plan",
-      items.map(x=>`${x.status==="completed"?"[x]":x.status==="inProgress"?"[~]":"[ ]"} ${x.text||x.title||x}`).join("\n"), ts);
+    if(items.length) return upsertItem(it,"tool","plan",
+      items.map(x=>`${x.status==="completed"?"[x]":x.status==="inProgress"?"[~]":"[ ]"} ${x.text||x.title||x}`).join("\n"),ts);
   }
-  if(/error/i.test(ty)) return add("err",ty,textOf(it)||JSON.stringify(it).slice(0,600),ts);
+  if(/error/i.test(ty)) return upsertItem(it,"err",ty,
+    textOf(it)||JSON.stringify(it).slice(0,600),ts);
   // unknown item type: show the type plainly, payload collapsed
-  return add("tool",ty||"item",JSON.stringify(it,null,1).slice(0,900),ts);
+  return upsertItem(it,"tool",ty||"item",JSON.stringify(it,null,1).slice(0,900),ts);
 }
 
 /* ---------- protocol pane ---------- */
@@ -849,11 +859,11 @@ async function loadProjects(){
   if(projReg.defaultCwd) DEFAULT_CWD=projReg.defaultCwd;
 }
 const base=p=>(p||"").replace(/\/+$/,"").split("/").pop()||"";
-function projRootOf(id){ return (projReg.threads[id]||{}).root || cwdCache[id] || ""; }
+function projRootOf(id){ return (projReg.threads[id]||{}).root || ""; }
 function projOf(id){
   const pin=projReg.threads[id];
   if(pin&&pin.name) return pin.name;
-  return base(cwdCache[id])||"(no project)";
+  return "(unassigned)";
 }
 let threadsGeneration=0;
 async function loadThreads(){
@@ -871,7 +881,7 @@ async function loadThreads(){
   const running=threads.filter(t=>isActive(t)).length;
   $("#nR").textContent=running?` ${running}`:"";
   $("#nD").textContent=threads.length?` ${threads.length-running}`:"";
-  const projs=new Set(threads.map(t=>projOf(t.id))); projs.delete("(no project)");
+  const projs=new Set(threads.map(t=>projOf(t.id))); projs.delete("(unassigned)");
   $("#nP").textContent=projs.size?` ${projs.size}`:"";
   renderList();
 }
@@ -1956,21 +1966,34 @@ es.onmessage=async ev=>{
   }
   else if(meth==="item/agentMessage/delta"){
     const stick=atBottom();
-    if(!streamEl) streamEl=add("agent","codex","");
+    const key=p.itemId||(p.item&&p.item.id);
+    if(key&&itemEls[key]) streamEl=itemEls[key].querySelector(".body");
+    if(!streamEl){ streamEl=add("agent","codex","");
+      if(key) itemEls[key]=streamEl.parentElement; }
     streamEl.dataset.raw=(streamEl.dataset.raw||"")+(p.delta??p.text??"");
     streamEl.textContent=streamEl.dataset.raw;   // plain while streaming: half-written
     if(stick) logEl.scrollTop=logEl.scrollHeight; // markdown renders wrong mid-token
   }
   else if(/reasoning.*delta/i.test(meth||"")){
     const stick=atBottom();
-    if(!reasonEl) reasonEl=add("rsn","thinking","");
+    const key=p.itemId||(p.item&&p.item.id);
+    if(key&&itemEls[key]) reasonEl=itemEls[key].querySelector(".body");
+    if(!reasonEl){ reasonEl=add("rsn","thinking","");
+      if(key) itemEls[key]=reasonEl.parentElement; }
     reasonEl.dataset.raw=(reasonEl.dataset.raw||"")+(p.delta??p.text??"");
     reasonEl.textContent=reasonEl.dataset.raw;
     if(stick) logEl.scrollTop=logEl.scrollHeight;
   }
   else if(meth==="item/started"){
-    const ty=String((p.item||{}).type||"");
-    if(/commandExecution|exec/i.test(ty)) renderItem(p.item);
+    const it=p.item||{}, ty=String(it.type||"");
+    // Reserve the item's DOM position at START, then update that same node at
+    // completion. Appending tools only when they finished let later streamed
+    // prose overtake slow tools and made a serial protocol look out of order.
+    if(!/^user/i.test(ty)){
+      const body=renderItem(it);
+      if(/agentMessage|agent_message/i.test(ty)) streamEl=body;
+      else if(/reasoning/i.test(ty)) reasonEl=body;
+    }
   }
   else if(meth==="item/completed"){
     const it=p.item||{}; const ty=String(it.type||"");
@@ -1983,11 +2006,17 @@ es.onmessage=async ev=>{
       return;
     }
     if(/agentMessage|agent_message/i.test(ty)){
-      const stick=atBottom(); renderMd(streamEl); streamEl=null;
+      const stick=atBottom(), key=it.id||it.itemId;
+      const body=(key&&itemEls[key]&&itemEls[key].querySelector(".body"))||streamEl;
+      if(textOf(it)) renderItem(it); else renderMd(body);
+      if(streamEl===body) streamEl=null;
       if(stick) logEl.scrollTop=logEl.scrollHeight;
     }
     else if(/reasoning/i.test(ty)){
-      const stick=atBottom(); renderMd(reasonEl); reasonEl=null;
+      const stick=atBottom(), key=it.id||it.itemId;
+      const body=(key&&itemEls[key]&&itemEls[key].querySelector(".body"))||reasonEl;
+      if(textOf(it)) renderItem(it); else renderMd(body);
+      if(reasonEl===body) reasonEl=null;
       if(stick) logEl.scrollTop=logEl.scrollHeight;
     }
     else renderItem(it);
