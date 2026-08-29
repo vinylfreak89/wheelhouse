@@ -470,10 +470,11 @@ class Handler(BaseHTTPRequestHandler):
         if pin:
             out["project"] = pin.get("name")
             out["project_root"] = pin.get("root")
-        else:                      # unpinned: fall back to the folder it runs in
-            root = out.get("cwd") or ""
-            out["project_root"] = root
-            out["project"] = os.path.basename(root.rstrip("/")) or "(no project)"
+        else:
+            # Runtime cwd is deliberately not project membership. Guessing here
+            # recreates the relocation bug the registry exists to prevent.
+            out["project_root"] = ""
+            out["project"] = "(unassigned)"
         return self._send(200, json.dumps(out).encode())
 
     def _sse(self):

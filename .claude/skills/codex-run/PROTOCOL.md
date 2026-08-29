@@ -92,8 +92,11 @@ where no Claude session id exists, falls back to the most recently active
 same-directory session. The user should be able to look at a Codex thread and
 know which conversation spawned it.
 
-`find_thread` resolves through the registry's **chat** binding rather than the
-thread's display name, which is why a rename is safe at any time.
+`find_thread` resolves through the registry's canonical **chat id → thread id**
+binding rather than the thread's display name or current directory, which is
+why both a rename and a turn-level cwd change are safe at any time. If an old
+CWD-based resolver created duplicates, the first canonical binding remains the
+one thread implicitly selected for that chat.
 
 No `[project]` prefix: the sidebar already groups by the project pin, so the
 prefix is redundant.
@@ -102,11 +105,16 @@ prefix is redundant.
 `<repo>/state/projects.json`. The bridge serves that at `/projects`, and the
 sidebar groups on it — not on `threads.cwd`, which a turn can change.
 
-**Why the basename is the display name.** The displayed name is the project
-directory's basename, the same name Claude Code shows. Claude Code has no
-separate project-name record: a project IS a cwd, so the basename is
-authoritative rather than a guess. The sidebar shows the name and keeps the full
-path in the tooltip.
+**Project name and root are separate.** The registry stores the displayed name
+independently from the project root and from a thread's mutable cwd. The root's
+basename is only the initial default. `codex-run project --name` sets an
+explicit label; the sidebar shows that label and keeps the root in the tooltip.
+
+**Legacy repair is conservative.** `codex-run project --repair` reads the
+creation cwd from each rollout's immutable `session_meta`; it never consults the
+thread's current cwd. Bulk repair also leaves chat ownership unset because the
+one chat driving the repair cannot own every repaired thread. The owning chat
+adds its stable identity lazily when it next resolves that thread.
 
 ---
 

@@ -292,7 +292,7 @@ through the CLI there is nothing to remember.
 
     codex-run project              # name, root, and this chat's pinned thread
     codex-run project --name NAME  # override (two checkouts, same basename)
-    codex-run project --repair     # pin threads created before the registry
+    codex-run project --repair     # pin legacy threads from immutable rollout metadata
 
 ### Thread names are cosmetic — resolution is not
 
@@ -302,9 +302,9 @@ time, including on a thread mid-turn.
 If you touch that code path, keep the property and test it by exercising it —
 rename, re-resolve, assert the id is unchanged.
 
-The displayed name is the project directory's **basename** — the same name
-Claude Code shows. Do not derive a prettier name from `CLAUDE.md` or anywhere
-else.
+The displayed project name is an independent registry field. The project
+root's basename is only its initial default; `project --name` sets it
+explicitly. Never derive project identity from a turn's mutable `cwd`.
 
 ## Effort is a budget decision, not a default
 

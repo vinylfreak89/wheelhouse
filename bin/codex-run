@@ -228,8 +228,8 @@ def chat_title():
 def default_name(cwd=None):
     """Just the chat title.
 
-    No "[project]" prefix: the sidebar already groups threads by cwd, so the
-    prefix was only ever a workaround for the missing project API.
+    No "[project]" prefix: the sidebar groups threads by their saved project
+    binding, so the prefix was only ever a workaround for the missing registry.
     """
     t = chat_title()
     if t:
@@ -238,8 +238,11 @@ def default_name(cwd=None):
 
 
 def project_cwd(explicit=None):
-    """Default to the directory Claude is working in, so the thread lands in the
-    right project group -- the sidebar groups by cwd and there is no project API."""
+    """Return the requested working directory.
+
+    At thread creation this is also the default project root. Once the project
+    binding exists, later working-directory changes must not alter it.
+    """
     return os.path.abspath(explicit or os.environ.get("CODEX_CWD") or os.getcwd())
 
 
@@ -259,10 +262,11 @@ def _registry():
         if isinstance(r, dict):
             r.setdefault("threads", {})
             r.setdefault("roots", {})
+            r.setdefault("chats", {})
             return r
     except Exception:
         pass
-    return {"threads": {}, "roots": {}}
+    return {"threads": {}, "roots": {}, "chats": {}}
 
 
 def _registry_save(reg):
@@ -274,13 +278,11 @@ def _registry_save(reg):
 
 
 def project_name(root=None):
-    """The project's name, the same one Claude Code shows: its directory's
-    basename. Claude Code has no separate project-name record -- a project IS
-    a cwd -- so the basename is the authoritative name, not a guess. The
-    sidebar shows this; the full path stays in the tooltip.
+    """Return the project's independent display name.
 
-    $CODEX_PROJECT and `codex-run project --name` override it for the odd case
-    where two checkouts share a basename.
+    The registry stores names separately from both project roots and mutable
+    thread working directories. A root's basename is only the initial default;
+    $CODEX_PROJECT and `codex-run project --name` provide an explicit name.
     """
     root = os.path.abspath(root or project_cwd())
     env = (os.environ.get("CODEX_PROJECT") or "").strip()
@@ -292,7 +294,7 @@ def project_name(root=None):
     return os.path.basename(root.rstrip("/")) or "codex"
 
 
-def bind_project(tid, root=None, name=None):
+def bind_project(tid, root=None, name=None, capture_chat=True):
     """Pin a thread to a project. First binding wins unless a name is forced."""
     root = os.path.abspath(root or project_cwd())
     reg = _registry()
@@ -303,13 +305,19 @@ def bind_project(tid, root=None, name=None):
         entry = {"root": (entry or {}).get("root", root) if not name else root,
                  "name": name or reg["roots"].get(root) or project_name(root)}
         reg["threads"][tid] = entry
-    chat_id, title = chat_identity()
+    # Bulk legacy repair is not being driven by each repaired thread's owning
+    # chat. Stamping the current chat onto all of them cross-wires identity, so
+    # only normal create/reuse paths capture the caller's chat.
+    chat_id, title = chat_identity() if capture_chat else (None, None)
     if title and not entry.get("chat"):
         entry["chat"] = title
     else:
         entry.setdefault("chat", "")
     if chat_id:
         entry.setdefault("chat_id", chat_id)
+        # One Claude chat owns one canonical Codex thread. First binding wins;
+        # a later CWD-created duplicate must never replace it implicitly.
+        reg["chats"].setdefault(chat_id, tid)
     reg["roots"].setdefault(entry["root"], entry["name"])
     _registry_save(reg)
     return entry
@@ -317,6 +325,55 @@ def bind_project(tid, root=None, name=None):
 
 def project_of(tid):
     return _registry()["threads"].get(tid)
+
+
+def thread_origin_cwd(tid):
+    """Read a thread's immutable creation cwd from its rollout metadata.
+
+    `thread.cwd` is mutable and therefore cannot repair project membership.
+    The first session_meta record was written when the thread was created and
+    remains stable even after later `--cwd` or settings updates.
+    """
+    thread = (rpc("thread/read", {"threadId": tid}, 40).get("thread") or {})
+    path = thread.get("path") or thread.get("rolloutPath")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if record.get("type") != "session_meta":
+                    continue
+                cwd = (record.get("payload") or {}).get("cwd")
+                return os.path.abspath(cwd) if cwd else None
+    except OSError:
+        return None
+    return None
+
+
+def repair_projects():
+    """Pin legacy threads without consulting their mutable runtime cwd.
+
+    Chat identity is intentionally left empty: this bulk operation runs from
+    one caller and cannot know which Claude chat owns every other thread. A
+    later invocation from the owning chat adds that identity lazily.
+    """
+    fixed = 0
+    skipped = []
+    for thread in rpc("thread/list", {"limit": 200}, 40).get("data", []):
+        tid = thread["id"]
+        if project_of(tid):
+            continue
+        root = thread_origin_cwd(tid)
+        if not root:
+            skipped.append(tid)
+            continue
+        bind_project(tid, root, capture_chat=False)
+        fixed += 1
+    return fixed, skipped
 
 
 DEFAULT_EFFORT = os.environ.get("CODEX_EFFORT", "xhigh")
@@ -417,7 +474,7 @@ def lock_release(owner=None):
 
 
 def find_thread(name, cwd=None):
-    """The thread belonging to this chat, in this project.
+    """The canonical thread belonging to this chat.
 
     Resolution goes through the registry, keyed by the CHAT the thread was
     created for -- not by the thread's display name. Names are cosmetic and the
@@ -431,7 +488,9 @@ def find_thread(name, cwd=None):
                         or os.path.basename(want_cwd.rstrip("/"))
                         or "codex session")
     automatic_name = name == expected_default
-    reg = _registry()["threads"]
+    registry = _registry()
+    registry.setdefault("chats", {})
+    reg = registry["threads"]
     live = {t["id"]: t for t in rpc("thread/list", {"limit": 100}, 40).get("data", [])}
 
     def recency(tid):
@@ -449,21 +508,23 @@ def find_thread(name, cwd=None):
         # before the chat_id match silently broke it. A call from a different
         # directory matched nothing, and reuse-or-create then made a SECOND
         # thread for a chat that already had one.
-        #
-        # Root is still cosmetic (sidebar grouping) and still re-pinned by
-        # bind_project on reuse, so a chat that genuinely moves project keeps
-        # its thread and the thread follows it. It only breaks ties now: a
-        # root match outranks a non-match, then recency, so a stale duplicate
-        # can never outrank the thread belonging to the directory in hand.
-        best_key = None
+        canonical = registry["chats"].get(want_chat_id)
+        if canonical in live and (reg.get(canonical) or {}).get("chat_id") == want_chat_id:
+            return canonical
+
+        # Legacy registries may contain duplicates created by the old CWD
+        # resolver but no canonical index. Pick the oldest deterministically;
+        # the caller's subsequent bind_project() persists that first binding.
+        matches = []
         for tid, entry in reg.items():
             if tid not in live or entry.get("chat_id") != want_chat_id:
                 continue
-            key = (entry.get("root") == want_cwd, recency(tid))
-            if best_key is None or key > best_key:
-                best, best_key = tid, key
-        if best:
-            return best
+            created = live[tid].get("createdAt")
+            try: created = float(created)
+            except (TypeError, ValueError): created = float("inf")
+            matches.append((created, tid))
+        if matches:
+            return min(matches)[1]
 
     # Lazily migrate a title-only binding written by older Wheelhouse versions.
     # Never use this path for an entry already bound to a different stable id.
@@ -741,12 +802,10 @@ def main():
             _registry_save(reg)
             print(f"project name set: {nm}")
         elif "--repair" in a:
-            fixed = 0
-            for t in rpc("thread/list", {"limit": 200}, 40).get("data", []):
-                if not project_of(t["id"]):
-                    bind_project(t["id"], t.get("cwd") or project_cwd())
-                    fixed += 1
+            fixed, skipped = repair_projects()
             print(f"bound {fixed} previously-unpinned thread(s)")
+            if skipped:
+                print(f"skipped {len(skipped)} without creation metadata")
         else:
             root = project_cwd()
             print(f"name : {project_name(root)}")

@@ -226,7 +226,8 @@ class HandlerContractTests(unittest.TestCase):
             data = json.loads(sent[0][1])
             self.assertEqual(data["model"], "gpt-test")
             self.assertEqual(data["cwd"], "/work/project")
-            self.assertEqual(data["project"], "project")
+            self.assertEqual(data["project"], "(unassigned)")
+            self.assertEqual(data["project_root"], "")
 
 
 class AppServerFramingTests(unittest.TestCase):

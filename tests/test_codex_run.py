@@ -110,7 +110,7 @@ class ThreadResolutionTests(unittest.TestCase):
                       "chat": "Same title", "chat_id": "local-wrong"},
             "right": {"root": self.cwd, "name": "project",
                       "chat": "Same title", "chat_id": "local-right"},
-        }, "roots": {}}
+        }, "roots": {}, "chats": {"local-right": "right"}}
         with mock.patch.object(codex_run, "chat_identity",
                                return_value=("local-right", "Same title")), \
              mock.patch.object(codex_run, "_registry", return_value=registry), \
@@ -129,7 +129,7 @@ class ThreadResolutionTests(unittest.TestCase):
         registry = {"threads": {
             "right": {"root": self.cwd, "name": "project",
                       "chat": "Same title", "chat_id": "local-right"},
-        }, "roots": {}}
+        }, "roots": {}, "chats": {"local-right": "right"}}
         with mock.patch.object(codex_run, "chat_identity",
                                return_value=("local-right", "Same title")), \
              mock.patch.object(codex_run, "_registry", return_value=registry), \
@@ -139,25 +139,38 @@ class ThreadResolutionTests(unittest.TestCase):
                 codex_run.find_thread("Same title", cwd="/somewhere/else"),
                 "right")
 
-    def test_root_match_outranks_recency_within_one_chat(self):
-        """Root is a tie-breaker now, not a gate.
-
-        If one chat somehow has two live threads, the one belonging to the
-        directory in hand wins even when the other was touched more recently
-        ("wrong" is updatedAt 20 against "right" at 10).
-        """
+    def test_canonical_chat_thread_wins_even_when_cwd_matches_a_duplicate(self):
         registry = {"threads": {
-            "wrong": {"root": "/somewhere/else", "name": "project",
+            "wrong": {"root": self.cwd, "name": "project",
                       "chat": "Same title", "chat_id": "local-right"},
-            "right": {"root": self.cwd, "name": "project",
+            "right": {"root": "/original/project", "name": "project",
                       "chat": "Same title", "chat_id": "local-right"},
-        }, "roots": {}}
+        }, "roots": {}, "chats": {"local-right": "right"}}
         with mock.patch.object(codex_run, "chat_identity",
                                return_value=("local-right", "Same title")), \
              mock.patch.object(codex_run, "_registry", return_value=registry), \
              mock.patch.object(codex_run, "rpc",
                                return_value={"data": self.live}):
             self.assertEqual(codex_run.find_thread("Same title"), "right")
+
+    def test_legacy_duplicate_fallback_chooses_oldest_not_matching_cwd(self):
+        live = [
+            {"id": "older", "name": "Same title", "cwd": "/original",
+             "createdAt": 10, "updatedAt": 10},
+            {"id": "newer", "name": "Same title", "cwd": self.cwd,
+             "createdAt": 20, "updatedAt": 20},
+        ]
+        registry = {"threads": {
+            "older": {"root": "/original", "name": "project",
+                       "chat": "Same title", "chat_id": "local-right"},
+            "newer": {"root": self.cwd, "name": "project",
+                       "chat": "Same title", "chat_id": "local-right"},
+        }, "roots": {}, "chats": {}}
+        with mock.patch.object(codex_run, "chat_identity",
+                               return_value=("local-right", "Same title")), \
+             mock.patch.object(codex_run, "_registry", return_value=registry), \
+             mock.patch.object(codex_run, "rpc", return_value={"data": live}):
+            self.assertEqual(codex_run.find_thread("Same title"), "older")
 
     def test_legacy_title_binding_remains_resolvable(self):
         registry = {"threads": {
@@ -208,6 +221,83 @@ class ThreadResolutionTests(unittest.TestCase):
                 codex_run.bind_project("right")
             saved = json.loads(registry_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["threads"]["right"]["chat_id"], "local-right")
+            self.assertEqual(saved["chats"]["local-right"], "right")
+
+
+class ProjectRepairTests(unittest.TestCase):
+    def test_origin_comes_from_rollout_not_mutable_thread_cwd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout = Path(temp) / "rollout.jsonl"
+            rollout.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {"cwd": "/original/project"},
+            }) + "\n", encoding="utf-8")
+            with mock.patch.object(codex_run, "rpc", return_value={
+                "thread": {"cwd": "/later/runtime/cwd", "path": str(rollout)},
+            }):
+                self.assertEqual(
+                    codex_run.thread_origin_cwd("legacy"),
+                    "/original/project",
+                )
+
+    def test_bulk_repair_does_not_stamp_callers_chat_onto_legacy_threads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry_path = Path(temp) / "projects.json"
+            registry_path.write_text(json.dumps({
+                "threads": {}, "roots": {},
+            }), encoding="utf-8")
+            rollout = Path(temp) / "rollout.jsonl"
+            rollout.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {"cwd": "/original/project"},
+            }) + "\n", encoding="utf-8")
+
+            def fake_rpc(method, params=None, timeout=None):
+                if method == "thread/list":
+                    return {"data": [{
+                        "id": "legacy", "cwd": "/later/runtime/cwd",
+                    }]}
+                if method == "thread/read":
+                    return {"thread": {
+                        "cwd": "/later/runtime/cwd", "path": str(rollout),
+                    }}
+                raise AssertionError(method)
+
+            with mock.patch.object(codex_run, "REGISTRY", str(registry_path)), \
+                 mock.patch.object(codex_run, "rpc", side_effect=fake_rpc), \
+                 mock.patch.object(codex_run, "chat_identity",
+                                   return_value=("callers-chat", "Caller")):
+                fixed, skipped = codex_run.repair_projects()
+
+            self.assertEqual((fixed, skipped), (1, []))
+            saved = json.loads(registry_path.read_text(encoding="utf-8"))
+            entry = saved["threads"]["legacy"]
+            self.assertEqual(entry["root"], "/original/project")
+            self.assertEqual(entry["name"], "project")
+            self.assertEqual(entry["chat"], "")
+            self.assertNotIn("chat_id", entry)
+
+    def test_unreadable_creation_metadata_is_skipped_not_guessed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry_path = Path(temp) / "projects.json"
+            registry_path.write_text(json.dumps({
+                "threads": {}, "roots": {},
+            }), encoding="utf-8")
+
+            def fake_rpc(method, params=None, timeout=None):
+                if method == "thread/list":
+                    return {"data": [{"id": "legacy", "cwd": "/mutable"}]}
+                if method == "thread/read":
+                    return {"thread": {"cwd": "/mutable"}}
+                raise AssertionError(method)
+
+            with mock.patch.object(codex_run, "REGISTRY", str(registry_path)), \
+                 mock.patch.object(codex_run, "rpc", side_effect=fake_rpc):
+                fixed, skipped = codex_run.repair_projects()
+
+            self.assertEqual((fixed, skipped), (0, ["legacy"]))
+            saved = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["threads"], {})
 
 
 class ApprovalDefaultTests(unittest.TestCase):
