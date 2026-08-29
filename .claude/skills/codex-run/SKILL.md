@@ -105,9 +105,19 @@ shape without carrying anyone's local policy.
    `codex app-server proxy`.
 4. **Never install `claude`, never put it on PATH.** See "Speaking Codex's
    language" — this is a boundary, not an obstacle.
-5. Default new threads to `sandbox:"workspace-write"`, `approvalPolicy:"never"`
-   unless the user asks otherwise; raise to `on-request`/`untrusted` for
-   anything destructive.
+5. New threads default to `sandbox:"workspace-write"` + the **`auto-review`**
+   mode (`approvalPolicy:"on-request"`, `approvalsReviewer:"auto_review"`) — the
+   CLI's default; `CODEX_APPROVALS` overrides it. Use `approvalPolicy:"never"`
+   only when the user explicitly wants a fully autonomous, no-escalation thread.
+   **Never use `never` for work that must write to `.git` (commits, tags,
+   rebases):** under `sandbox:"workspace-write"` the sandbox denies `.git`
+   writes, and `never` gives Codex no escalation path, so the commit fails
+   *silently* (`Unable to create '.git/index.lock': Operation not permitted`).
+   Any commit-capable dispatch needs `on-request`/`auto-review`. `send`/`task`
+   cannot change an existing thread's mode, so check it first with
+   `codex-run info <id>`; a legacy `never` thread (created before the CLI's
+   default moved off `never`) must be raised in the UI or replaced with a fresh
+   thread.
 6. **Do not use the official desktop app.** It cannot drive these threads;
    `./PROTOCOL.md` has the upstream issues.
 
@@ -283,6 +293,12 @@ into a sandbox.
 
 *Why, and the error it produces: `./INCIDENTS.md`, "Every read worked; the
 first write failed".*
+
+**`.git` sits inside the workspace but is still write-denied under
+`workspace-write`,** so a `git commit` needs `approvalPolicy:"on-request"`
+(auto-review) to escalate — never `approvalPolicy:"never"`, under which the
+commit fails silently. See Hard rule 5 and `./INCIDENTS.md`, "A `never` thread
+committed nothing and said nothing".
 
 ### `--cwd` moves the writes, NOT the conversation
 

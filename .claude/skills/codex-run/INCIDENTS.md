@@ -162,3 +162,22 @@ it and die with:
 Starting a fresh job silently discards work and, for gates with cumulative
 filters, corrupts the history. Isolation is usually the point of the per-stage
 sub-agent, so do not answer bootstrap prompts inline when the tool expects one.
+
+## A `never` thread committed nothing and said nothing
+
+*Rule: Hard rule 5.*
+
+A dispatch whose job was to `git commit` went to an existing thread created
+under the CLI's old hardcoded `approvalPolicy:"never"`. Under
+`sandbox:"workspace-write"`, `.git` writes are denied; under `never` there is no
+escalation path, so `git add` failed with `Unable to create '.git/index.lock':
+Operation not permitted` and the turn ended having committed nothing — the
+failure surfaced only as a sandbox error handed back to the agent, easy to miss.
+The CLI default has since moved to `auto-review` (`on-request`), but existing
+threads keep whatever they were born with, and `send`/`task` cannot change an
+existing thread's mode. Before dispatching commit/git work to an existing
+thread, check `codex-run info <id>`; a legacy `never` thread must be raised in
+the UI or replaced with a fresh one. And do NOT "fix" the symptom by touching
+the repo's filesystem — stripping `.git`'s sandbox ACL / xattrs (`com.apple.macl`)
+is out of scope, doesn't close the approval gap, and just corrupts the sandbox
+metadata (restore it from a backup if you already did).
