@@ -631,7 +631,7 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     """
     with open(os.path.expanduser(path), encoding="utf-8") as prompt:
         text = prompt.read()
-    inp = [{"type": "text", "text": text}]
+    inp = _turn_input(text)
     if skill:
         inp.append({"type": "skill", "name": skill,
                     "path": skill_path or _skill_path(skill)})
@@ -728,14 +728,52 @@ def errors_of(tid):
     return out
 
 
+def turn_protocol():
+    """Codex-facing shared-checkout protocol, injected into every dispatched
+    turn. Codex cannot read SKILL.md (deliberately not a Codex skill root), so
+    the working agreement — lock, commit conventions, AGENTS.md symlink — must
+    ride along with the dispatch or Codex has no standing instructions at all
+    (observed: a repo without AGENTS.md left Codex committing with no trailer
+    and writing without the lock). CODEX_NO_PROTOCOL=1 skips it."""
+    if os.environ.get("CODEX_NO_PROTOCOL") == "1":
+        return None
+    p = os.path.join(ROOT, ".claude", "skills", "codex-run", "CODEX-TURN.md")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read().replace("{LOCKFILE}", LOCKFILE)
+    except Exception:
+        return None
+
+
+def _turn_input(text):
+    inp = []
+    proto = turn_protocol()
+    if proto:
+        inp.append({"type": "text", "text": proto})
+    inp.append({"type": "text", "text": text})
+    return inp
+
+
 def send(tid, text, model=None, effort=None):
     # Same rule as send_file: inherit the thread's settings unless overridden.
-    p = {"threadId": tid, "input": [{"type": "text", "text": text}]}
+    p = {"threadId": tid, "input": _turn_input(text)}
     if model: p["model"] = model
     if effort: p["effort"] = effort
-    before = len(transcript(tid))
-    rpc("turn/start", p, 900)
-    wait_idle(tid)
+    # A send turn WRITES just like a task turn does; hold the tree lock for its
+    # duration (send previously skipped this, so send-dispatched turns ran with
+    # no lock held by anyone unless Codex thought to take it itself).
+    held = lock_acquire(f"codex:{tid[:8]}", note="turn in progress (send)",
+                        wait=int(os.environ.get("LOCK_WAIT", "0")))
+    if not held:
+        cur = lock_status() or {}
+        print(f"WARNING: tree lock held by {cur.get('owner')} (pid {cur.get('pid')})"
+              " -- dispatching anyway, edits may interleave", file=sys.stderr)
+    try:
+        before = len(transcript(tid))
+        rpc("turn/start", p, 900)
+        wait_idle(tid)
+    finally:
+        if held: lock_release(f"codex:{tid[:8]}")
     for ty, txt in transcript(tid)[before:]:
         if "agentMessage" in ty:
             print(txt)
@@ -927,7 +965,7 @@ def main():
         send_file(tid, taskfile, effort=eff, cwd=cwdo)
     elif c == "queue":
         r = rpc("thread/queue/add", {"threadId": a[1],
-                "input": [{"type": "text", "text": a[2]}],
+                "input": _turn_input(a[2]),
                 "clientUserMessageId": f"cr-{int(time.time()*1000)}"}, 60)
         print("queued" if r is not None else "queue failed")
     elif c == "stop":
