@@ -66,6 +66,8 @@ def handler(path, body=b""):
 class HandlerContractTests(unittest.TestCase):
     def setUp(self):
         self.app = FakeApp()
+        bridge.DRAFTS.clear()
+        bridge.DRAFT_EPOCH = 0
         self.app_patch = mock.patch.object(bridge, "APP", self.app)
         self.app_patch.start()
 
@@ -199,6 +201,94 @@ class HandlerContractTests(unittest.TestCase):
         request, sent = handler("/unknown", b"{}")
         request.do_POST()
         self.assertEqual(sent[0][0], 404)
+
+    def test_drafts_survive_webview_reload_without_crossing_threads(self):
+        for thread_id, text in (("thread-a", "unfinished A"),
+                                ("thread-b", "unfinished B")):
+            request, sent = handler(f"/draft?id={thread_id}")
+            request.do_GET()
+            epoch = json.loads(sent[0][1])["epoch"]
+            payload = json.dumps({"id": thread_id, "text": text,
+                                  "epoch": epoch, "sequence": 1}).encode()
+            request, sent = handler("/draft", payload)
+            request.do_POST()
+            self.assertEqual(json.loads(sent[0][1]), {"ok": True})
+
+        request, sent = handler("/draft?id=thread-a")
+        request.do_GET()
+        thread_a = json.loads(sent[0][1])
+        self.assertEqual(thread_a["text"], "unfinished A")
+        request, sent = handler("/draft?id=thread-b")
+        request.do_GET()
+        self.assertEqual(json.loads(sent[0][1])["text"], "unfinished B")
+
+        request, _ = handler(
+            "/draft", json.dumps({"id": "thread-a", "text": "",
+                                  "epoch": thread_a["epoch"],
+                                  "sequence": 1}).encode())
+        request.do_POST()
+        request, sent = handler("/draft?id=thread-a")
+        request.do_GET()
+        self.assertEqual(json.loads(sent[0][1])["text"], "")
+
+    def test_draft_contract_rejects_missing_ids_and_non_string_text(self):
+        request, sent = handler("/draft", b'{"text":"x"}')
+        request.do_POST()
+        self.assertEqual(sent[0][0], 400)
+        request, sent = handler(
+            "/draft", b'{"id":"thread-a","text":12,"epoch":1,"sequence":1}')
+        request.do_POST()
+        self.assertEqual(sent[0][0], 400)
+
+    def test_new_draft_epoch_rejects_late_writes_from_the_reloaded_page(self):
+        request, sent = handler("/draft?id=thread-a")
+        request.do_GET()
+        old_epoch = json.loads(sent[0][1])["epoch"]
+        request, sent = handler("/draft?id=thread-a")
+        request.do_GET()
+        new_epoch = json.loads(sent[0][1])["epoch"]
+
+        request, sent = handler("/draft", json.dumps({
+            "id": "thread-a", "text": "old page", "epoch": old_epoch,
+            "sequence": 99,
+        }).encode())
+        request.do_POST()
+        self.assertEqual(sent[0][0], 409)
+        request, sent = handler("/draft", json.dumps({
+            "id": "thread-a", "text": "new page", "epoch": new_epoch,
+            "sequence": 1,
+        }).encode())
+        request.do_POST()
+        self.assertEqual(sent[0][0], 200)
+
+    def test_transcript_preserves_assistant_phase_and_reports_source_inversions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".codex" / "sessions"
+            root.mkdir(parents=True)
+            rollout = root / "rollout-thread-a.jsonl"
+            records = [
+                {"timestamp": "2026-08-30T02:00:00Z", "type": "response_item",
+                 "payload": {"type": "message", "role": "assistant",
+                             "phase": "commentary",
+                             "content": [{"type": "output_text", "text": "working"}]}},
+                {"timestamp": "2026-08-30T01:59:59Z", "type": "response_item",
+                 "payload": {"type": "message", "role": "assistant",
+                             "phase": "final_answer",
+                             "content": [{"type": "output_text", "text": "done"}]}},
+            ]
+            rollout.write_text("".join(json.dumps(r) + "\n" for r in records),
+                               encoding="utf-8")
+            request, sent = handler("/transcript?id=thread-a")
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                request.do_GET()
+            data = json.loads(sent[0][1])
+
+        self.assertEqual([(r["cls"], r["who"], r["text"]) for r in data["rows"]], [
+            ("rsn", "codex · thinking", "working"),
+            ("agent", "codex", "done"),
+        ])
+        self.assertTrue(data["revision"])
+        self.assertIn("1 timestamp inversion", data["journalWarning"])
 
     def test_threadmeta_tolerates_a_reduced_state_database_schema(self):
         with tempfile.TemporaryDirectory() as temp:

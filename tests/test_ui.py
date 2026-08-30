@@ -55,6 +55,7 @@ class UiStaticTests(unittest.TestCase):
             "/projects": 'self.path == "/projects"',
             "/threadmeta": 'self.path.startswith("/threadmeta")',
             "/transcript": 'self.path.startswith("/transcript")',
+            "/draft": 'self.path.startswith("/draft")',
         }
         for endpoint, implementation in expected.items():
             self.assertIn(endpoint, self.html)
@@ -262,7 +263,9 @@ class UiStaticTests(unittest.TestCase):
         self.assertNotIn("open_(cur)", reconcile)
 
     def test_hot_reload_restores_thread_before_accepting_its_live_events(self):
-        self.assertIn('const ACTIVE_THREAD_KEY="wheelhouse.activeThread"', self.html)
+        self.assertNotIn("sessionStorage", self.html)
+        self.assertNotIn("localStorage", self.html)
+        self.assertIn('new URLSearchParams(location.hash.slice(1))', self.html)
         opened = self.html.split("async function open_(id)", 1)[1].split(
             "/* ---------- new thread", 1)[0]
         self.assertIn("threadViewReady=false", opened)
@@ -276,6 +279,21 @@ class UiStaticTests(unittest.TestCase):
         delta = events.index('meth==="item/agentMessage/delta"', route)
         self.assertLess(route, delta)
         self.assertIn('threadRoute==="not-ready"||threadRoute==="other"', events)
+
+    def test_unsent_drafts_are_bridge_backed_and_isolated_by_thread(self):
+        self.assertNotIn("sessionStorage", self.html)
+        self.assertNotIn("localStorage", self.html)
+        self.assertIn('fetch("/draft?id="+encodeURIComponent(threadId))', self.html)
+        self.assertIn('const body=JSON.stringify({id:threadId,text,epoch,sequence})',
+                      self.html)
+        self.assertIn('navigator.sendBeacon("/draft"', self.html)
+        self.assertIn("window.prepareReload=", self.html)
+        self.assertIn("web.callAsyncJavaScript(", self.native)
+        self.assertIn("window.prepareReload", self.native)
+        opened = self.html.split("async function open_(id)", 1)[1].split(
+            "/* ---------- new thread", 1)[0]
+        self.assertIn("await persistDraft(cur,input.value)", opened)
+        self.assertIn("input.value=await loadDraft(id)", opened)
 
     def test_external_user_items_render_live_while_local_echoes_are_deduplicated(self):
         sent = self.html.split("/* ---------- send ---------- */", 1)[1].split(

@@ -504,18 +504,16 @@ const UIContracts=Object.freeze({
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const logEl=$("#log"), listEl=$("#list"), wlogEl=$("#wlog");
 let logTarget=logEl;              // detached while rebuilding a transcript
-let cur=null, curInfo={}, busy=false, streamEl=null, reasonEl=null;
+let cur=null, curInfo={}, busy=false;
 let curTurn=null;                 // active turn id: turn/steer and turn/interrupt both need it
 let threadViewReady=false;        // false while a selected thread is being restored/opened
-const ACTIVE_THREAD_KEY="wheelhouse.activeThread";
 function rememberedThreadId(){
-  try{ return sessionStorage.getItem(ACTIVE_THREAD_KEY)||""; }catch(e){ return ""; }
+  try{ return new URLSearchParams(location.hash.slice(1)).get("thread")||""; }
+  catch(e){ return ""; }
 }
 function rememberThreadId(id){
-  try{
-    if(id) sessionStorage.setItem(ACTIVE_THREAD_KEY,id);
-    else sessionStorage.removeItem(ACTIVE_THREAD_KEY);
-  }catch(e){}
+  const hash=id?"#thread="+encodeURIComponent(id):location.pathname+location.search;
+  history.replaceState(null,"",hash);
 }
 
 /* curTurn is only ever set by a live turn/started event, so it is null whenever
@@ -1533,11 +1531,14 @@ let openGeneration=0;
 async function open_(id){
   const generation=++openGeneration;
   threadViewReady=false;
+  const input=$("#inp");
+  if(cur&&cur!==id) await persistDraft(cur,input.value);
+  input.disabled=true;
   // Overrides chosen for the thread being left do not describe the thread
   // being entered. Clear before cur moves, so the controls fall back to the
   // incoming thread's resolved defaults.
   if(cur!==id) UIContracts.resetTurnControls($$("#ctl select"));
-  cur=id; streamEl=null; reasonEl=null; curTurn=null;
+  cur=id; curTurn=null;
   rememberThreadId(id);
   renderedMetaFingerprint="";
   const r=await rpc("thread/resume",{threadId:id});
@@ -1570,7 +1571,9 @@ async function open_(id){
   // Otherwise the header can advertise the DB value while turn/start omits it
   // and the app-server silently reuses an older loaded-thread cwd.
   await loadMeta(id);
-  renderTranscript(rows);
+  renderTranscript(rows,{revision,journalWarning});
+
+  input.value=await loadDraft(id);
 
   threadViewReady=true;
   setBusy(((th.status||{}).type)==="active");
@@ -1665,6 +1668,7 @@ async function send(){
     if(cur!==threadId) return;
     if(!steerTo){ add("err","steer","no active turn to steer"); return; }
     $("#inp").value="";
+    await persistDraft(threadId,"");
     const optimistic=addOptimisticUser(threadId,t,"you (steer)");
     const r=await rpc("turn/steer",
       {threadId,expectedTurnId:steerTo,input:[{type:"text",text:t}]},120);
@@ -1676,6 +1680,7 @@ async function send(){
   }
 
   $("#inp").value="";
+  await persistDraft(threadId,"");
   const optimistic=addOptimisticUser(threadId,t,"you");
   setBusy(true);
   const p=UIContracts.turnStart({threadId,text:t,
@@ -1709,6 +1714,45 @@ $("#inp").addEventListener("keydown",e=>{
   if(e.key!=="Enter") return;
   if(e.shiftKey) return;                 // Shift+Enter -> newline
   e.preventDefault(); send();            // Enter (and Cmd/Ctrl+Enter) -> send
+});
+const draftEpochs={}, draftSequences={}, draftLatest={};
+function persistDraft(threadId,text){
+  if(!threadId) return Promise.resolve();
+  const epoch=draftEpochs[threadId];
+  if(!Number.isInteger(epoch)) return Promise.resolve();
+  const sequence=(draftSequences[threadId]||0)+1;
+  draftSequences[threadId]=sequence;
+  const body=JSON.stringify({id:threadId,text,epoch,sequence});
+  // Writes may finish out of order; the bridge rejects every sequence older
+  // than the newest accepted one, so typing never builds a serial HTTP queue.
+  const write=fetch("/draft",{
+    method:"POST",headers:{"Content-Type":"application/json"},keepalive:true,
+    body
+  }).catch(()=>{});
+  draftLatest[threadId]=write;
+  return write;
+}
+async function loadDraft(threadId){
+  if(!threadId) return "";
+  await (draftLatest[threadId]||Promise.resolve());
+  try{
+    const r=await fetch("/draft?id="+encodeURIComponent(threadId));
+    const data=await r.json();
+    draftEpochs[threadId]=data.epoch; draftSequences[threadId]=0;
+    return typeof data.text==="string"?data.text:"";
+  }catch(e){ return ""; }
+}
+$("#inp").addEventListener("input",()=>{
+  if(cur) persistDraft(cur,$("#inp").value);
+});
+window.prepareReload=()=>cur?persistDraft(cur,$("#inp").value):Promise.resolve();
+window.addEventListener("pagehide",()=>{
+  if(!cur||!Number.isInteger(draftEpochs[cur])) return;
+  const sequence=(draftSequences[cur]||0)+1;
+  draftSequences[cur]=sequence;
+  navigator.sendBeacon("/draft",new Blob([JSON.stringify({
+    id:cur,text:$("#inp").value,epoch:draftEpochs[cur],sequence
+  })],{type:"application/json"}));
 });
 $$("#tabs .tab").forEach(el=>el.onclick=()=>{
   $$("#tabs .tab").forEach(x=>x.classList.remove("on"));
@@ -2016,7 +2060,7 @@ es.onmessage=async ev=>{
   let m; try{ m=JSON.parse(ev.data); }catch{ return; }
   const meth=m.method, p=m.params||{};
 
-  if(meth==="bridge/reload"){ location.reload(); return; }
+  if(meth==="bridge/reload"){ await window.prepareReload(); location.reload(); return; }
   if(meth==="bridge/wire"){ wire(p.dir,p.rpc,p.id,p.payload,p.err); return; }
   if(meth==="bridge/disconnected"){
     $("#dot").classList.remove("on");

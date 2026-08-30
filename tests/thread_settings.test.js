@@ -140,7 +140,7 @@ function harness(threadMeta) {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     models: MODELS,
     cur: null, curInfo: {}, curTurn: null,
-    streamEl: null, reasonEl: null, threadViewReady: false,
+    threadViewReady: false,
     reviewerCache: {}, nameCache: {}, cwdCache: {},
     logEl: {innerHTML: "", scrollTop: 0, scrollHeight: 0},
     $: sel => (sel.startsWith("#sel") || sel.startsWith("#m")
@@ -152,6 +152,8 @@ function harness(threadMeta) {
         .map(id => elements[id]);
     },
     rememberThreadId() {},
+    persistDraft: async () => {},
+    loadDraft: async () => "",
     setBusy() {},
     renderList() {},
     loadAgents() {},

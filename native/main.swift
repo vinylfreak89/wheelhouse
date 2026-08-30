@@ -93,7 +93,17 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
     }
 
     @objc func newThread() { web.evaluateJavaScript("window.openNewThread && window.openNewThread()") }
-    @objc func reload()    { web.reload() }
+    @objc func reload() {
+        // Persist the per-thread composer draft before replacing the page.
+        // callAsyncJavaScript awaits the page's Promise; evaluateJavaScript
+        // would return as soon as it saw the Promise object and still race it.
+        web.callAsyncJavaScript(
+            "return await (window.prepareReload ? window.prepareReload() : null);",
+            arguments: [:], in: nil, in: .page
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.web.reload() }
+        }
+    }
     @objc func showFind()  { web.evaluateJavaScript("window.openFind && window.openFind()") }
     @objc func findNext()  { web.evaluateJavaScript("window.findNext && window.findNext(false)") }
     @objc func findPrevious() { web.evaluateJavaScript("window.findNext && window.findNext(true)") }

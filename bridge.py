@@ -69,6 +69,9 @@ def _skill_roots():
 
 
 SKILL_ROOTS = _skill_roots()
+DRAFTS = {}
+DRAFT_LOCK = threading.Lock()
+DRAFT_EPOCH = 0
 
 
 class AppServer:
@@ -238,6 +241,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse()
         if self.path.startswith("/transcript"):
             return self._transcript()
+        if self.path.startswith("/draft"):
+            return self._draft()
         if self.path.startswith("/itemtimes"):
             return self._itemtimes()
         if self.path == "/projects":
@@ -254,6 +259,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 "alive": APP.alive, "error": APP.last_error, "pid": APP.p.pid}).encode())
         return self._send(404, b"{}")
+
+    def _draft(self):
+        """Return the unsent composer text for exactly one thread.
+
+        Drafts deliberately live in bridge memory, not browser storage and not
+        the transcript journal. They survive a WebView reload, remain isolated
+        by thread id, and disappear when Wheelhouse itself exits.
+        """
+        from urllib.parse import urlparse, parse_qs
+        tid = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+        if not tid:
+            return self._send(400, b'{"error":"no id"}')
+        global DRAFT_EPOCH
+        with DRAFT_LOCK:
+            text = (DRAFTS.get(tid) or {}).get("text", "")
+            DRAFT_EPOCH += 1
+            epoch = DRAFT_EPOCH
+            DRAFTS[tid] = {"text": text, "epoch": epoch, "sequence": -1}
+        return self._send(200, json.dumps({"text": text, "epoch": epoch}).encode())
 
     def _transcript(self):
         """The WHOLE conversation, render-ready, straight from the rollout JSONL.
@@ -542,6 +566,22 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
         except json.JSONDecodeError:
             return self._send(400, b'{"error":"bad json"}')
+        if self.path == "/draft":
+            tid, text = req.get("id"), req.get("text")
+            epoch, sequence = req.get("epoch"), req.get("sequence")
+            if not isinstance(tid, str) or not tid:
+                return self._send(400, b'{"error":"no id"}')
+            if not isinstance(text, str):
+                return self._send(400, b'{"error":"text must be a string"}')
+            if not isinstance(epoch, int) or not isinstance(sequence, int):
+                return self._send(400, b'{"error":"epoch and sequence must be integers"}')
+            with DRAFT_LOCK:
+                current = DRAFTS.get(tid)
+                if (not current or current["epoch"] != epoch or
+                        sequence <= current["sequence"]):
+                    return self._send(409, b'{"error":"stale draft write"}')
+                current.update(text=text, sequence=sequence)
+            return self._send(200, b'{"ok":true}')
         if self.path == "/respond":
             if "id" not in req:
                 return self._send(400, b'{"error":"no id"}')
