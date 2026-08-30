@@ -589,13 +589,19 @@ def new(name, cwd=None, model=None, effort=None, sandbox="workspace-write",
     return tid
 
 
-def wait_idle(tid, limit=600):
+def wait_idle(tid, limit=3600):
+    """Poll until the thread leaves 'active'. Returns True on idle, False when
+    the cap expires with the turn STILL RUNNING -- callers must surface that
+    loudly: a capped wait that returns silently masquerades as completion (a
+    10-minute turn cap made live turns look finished, their partial transcript
+    read as the final answer, and released the tree lock mid-turn)."""
     for _ in range(limit):
         for t in rpc("thread/list", {"limit": 50}, 30).get("data", []):
             if t["id"] == tid:
                 if (t.get("status") or {}).get("type") != "active":
-                    return
+                    return True
         time.sleep(1)
+    return False
 
 
 def transcript(tid, tail=None):
@@ -665,9 +671,13 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     try:
         before = len(transcript(tid))
         rpc("turn/start", p, 1800)
-        wait_idle(tid, limit=3600)
+        idle = wait_idle(tid, limit=int(os.environ.get("SEND_WAIT", "3600")))
     finally:
         if held: lock_release(f"codex:{tid[:8]}")
+    if not idle:
+        print(f"WARNING: turn STILL RUNNING after the wait cap -- output below is"
+              f" PARTIAL, and the tree lock has been released while Codex may still"
+              f" write. Follow with: codex-run watch {tid}", file=sys.stderr)
     for ty, txt in transcript(tid)[before:]:
         if "agentMessage" in ty:
             print(txt)
@@ -772,9 +782,13 @@ def send(tid, text, model=None, effort=None):
     try:
         before = len(transcript(tid))
         rpc("turn/start", p, 900)
-        wait_idle(tid)
+        idle = wait_idle(tid, limit=int(os.environ.get("SEND_WAIT", "3600")))
     finally:
         if held: lock_release(f"codex:{tid[:8]}")
+    if not idle:
+        print(f"WARNING: turn STILL RUNNING after the wait cap -- output below is"
+              f" PARTIAL, and the tree lock has been released while Codex may still"
+              f" write. Follow with: codex-run watch {tid}", file=sys.stderr)
     for ty, txt in transcript(tid)[before:]:
         if "agentMessage" in ty:
             print(txt)

@@ -182,6 +182,22 @@ the lock exactly as `task` does. A skill that says "this file carries every
 rule" makes its own omissions invisible — the empty case must be a rule, not
 an assumption.
 
+## The dispatcher stopped waiting and called it done
+
+*Rule: "Never leave work unhooked".*
+
+`send` waited for the turn with a silent 600-second cap: when a turn ran
+longer, the dispatcher printed the partial transcript exactly as it prints a
+finished one, released the tree lock while Codex was still writing, and exited
+zero. The orchestrator read the mid-turn commentary as a final answer,
+concluded the turn had "run out mid-cycle", and dispatched a continuation into
+a thread that was still active. It had already observed the same
+early-return twice and worked around it with watchers instead of chasing the
+mechanism. Both waits (`send`, `task`) now share a 3600 s cap (`SEND_WAIT`
+overrides) and, when the cap expires with the turn still active, say so
+LOUDLY and mark the output PARTIAL. A wait that can expire silently is not a
+wait — it is a coin toss that usually lands on "looked finished".
+
 ## A `never` thread committed nothing and said nothing
 
 *Rule: Hard rule 5.*
