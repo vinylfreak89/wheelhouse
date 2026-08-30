@@ -163,6 +163,25 @@ Starting a fresh job silently discards work and, for gates with cumulative
 filters, corrupts the history. Isolation is usually the point of the per-stage
 sub-agent, so do not answer bootstrap prompts inline when the tool expects one.
 
+## An assumed AGENTS.md gave Codex nothing
+
+*Rule: "The shared model — AGENTS.md must exist".*
+
+A project repo had no `AGENTS.md` at all. The skill assumed the file existed
+("Codex reads applicable AGENTS.md instructions automatically") and rule 6
+forbade restating its contents — so the orchestrator sent no conventions and
+Codex loaded none. Codex then worked a whole project committing without
+trailers, writing without the tree lock, and learning the working agreement
+only through ad-hoc dispatch text, one symptom at a time. Compounding it, the
+orchestrator dispatched exclusively via `send`, which at the time did not hold
+the lock (only `task` did), so no party ever held it automatically. The fix is
+three-part: `AGENTS.md` is created as a symlink to `CLAUDE.md` before the first
+dispatch (one shared model, never a bespoke file); every dispatched turn
+carries `CODEX-TURN.md` with the Codex-facing protocol; and `send` now holds
+the lock exactly as `task` does. A skill that says "this file carries every
+rule" makes its own omissions invisible — the empty case must be a rule, not
+an assumption.
+
 ## A `never` thread committed nothing and said nothing
 
 *Rule: Hard rule 5.*

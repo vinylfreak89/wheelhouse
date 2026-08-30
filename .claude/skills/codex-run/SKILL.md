@@ -27,7 +27,9 @@ after it holds the detail.
    held lock is a hard stop, not a hint. *(Take the tree lock)*
 5. **Hook every dispatch before moving on.** Use `watch "$TID"`, never
    `busy "$TID"` — `busy` is account-global. *(Never leave work unhooked)*
-6. **Do not restate what `AGENTS.md` already gives Codex.** *(Do NOT restate)*
+6. **Ensure the shared model EXISTS before the first dispatch into a project:
+   `AGENTS.md` must be a symlink to `CLAUDE.md` — create it if missing.** Then
+   do not restate what it already gives Codex. *(The shared model)*
 7. **Every dispatch carries entrypoint, inputs, preconditions, output
    contract.** *(Orchestrating well)*
 8. **Ask for status, counts and verbatim errors — never content — from a run
@@ -165,9 +167,12 @@ Never start a second `codex app-server` by hand.
     codex-run lock acquire claude "why"      # take it before you edit
     codex-run lock release
 
-`codex-run task` takes the lock for the DURATION of the turn automatically and
-releases it in a `finally`. If the lock is already held it warns and proceeds
-rather than blocking — set `LOCK_WAIT=300` to wait instead.
+`codex-run task` AND `codex-run send` take the lock for the DURATION of the
+turn automatically and release it in a `finally` (`send` historically did not —
+send-dispatched turns ran with nobody holding the lock). If the lock is already
+held they warn and proceed rather than blocking — set `LOCK_WAIT=300` to wait
+instead. Queued turns run with no live dispatcher process, so no lock is held
+for them; `CODEX-TURN.md` tells Codex to acquire it itself in that case.
 
 **It is advisory.** Treat a held lock as a hard stop and wait, rather than
 reasoning that your edit is small enough not to matter.
@@ -212,11 +217,41 @@ waits out any active turn, then sends the follow-up without you in the loop.
 
 *Why: `./INCIDENTS.md`, "Nothing was watching, so nothing was noticed".*
 
+## The shared model — AGENTS.md must exist, as a symlink to CLAUDE.md
+
+Codex reads `AGENTS.md` automatically; Claude reads `CLAUDE.md`. The two agents
+can only work off a shared model if those are the SAME FILE. Therefore, **before
+the first dispatch into any project, check that `AGENTS.md` exists**:
+
+    ls -la <project>/AGENTS.md || (cd <project> && ln -s CLAUDE.md AGENTS.md)
+
+- **If it is missing, create it as a symlink to `CLAUDE.md` — always a symlink,
+  never a separate authored file.** A bespoke `AGENTS.md` forks the instructions
+  into two documents that drift; the symlink keeps one source of truth.
+- **If a regular (non-symlink) `AGENTS.md` already exists, STOP and surface it
+  to the owner** — replacing an owner's file is not your call.
+- **Verify the link survives instruction edits.** Common atomic-write paths
+  replace a symlink with a regular file and silently fork the instructions;
+  after any edit to either name, `ls -la AGENTS.md` must still show the link.
+
+**The empty case is the trap that motivated this rule:** a repo WITHOUT
+`AGENTS.md` gives Codex zero standing instructions, while the orchestrator —
+obeying "don't restate what AGENTS.md provides" — sends none either. Codex then
+runs an entire project with no lock discipline, no commit conventions, and no
+trailers, and every symptom gets patched ad hoc in dispatch text.
+
+Every dispatched turn additionally carries `./CODEX-TURN.md` (auto-injected by
+the CLI in `send`/`task`/`queue`/`say`; `CODEX_NO_PROTOCOL=1` disables): the
+Codex-facing shared-checkout protocol — tree-lock mechanics, commit-as-you-go
+with Codex's own model trailer, narrow `git add`, never replacing the AGENTS.md
+symlink, never self-invoking `codex-run`. Keep that file terse (it costs tokens
+on every turn) and Codex-facing (never orchestrator driving instructions —
+see "Skill roots").
+
 ## Do NOT restate what Codex already loads
 
-Codex reads applicable `AGENTS.md` instructions automatically on every thread.
-Everything in them is already in context: project conventions, hard rules,
-directory layout, and scoped guidance.
+Everything in `AGENTS.md` is already in context: project conventions, hard
+rules, directory layout, and scoped guidance.
 
 So a dispatch must NOT re-state:
   * project conventions or coding standards
