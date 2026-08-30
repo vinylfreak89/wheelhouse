@@ -283,11 +283,16 @@ class Handler(BaseHTTPRequestHandler):
                         out += part
             return out
 
-        rows, calls = [], {}
+        rows, calls, revision = [], {}, ""
+        last_timestamp = None
+        timestamp_inversions = 0
         try:
             base = os.path.expanduser("~/.codex/sessions")
             files = sorted(f for f in glob.glob(os.path.join(base, "**", "*.jsonl"),
                                                 recursive=True) if tid in f)
+            stats = [os.stat(f) for f in files]
+            revision = ";".join(
+                f"{stat.st_mtime_ns}:{stat.st_size}" for stat in stats)
             for f in files:
                 with open(f) as fh:
                     for line in fh:
@@ -302,6 +307,10 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         pay = rec.get("payload") or {}
                         pt, ts = pay.get("type"), rec.get("timestamp")
+                        if ts:
+                            if last_timestamp is not None and ts < last_timestamp:
+                                timestamp_inversions += 1
+                            last_timestamp = ts
 
                         if pt == "message":
                             role = pay.get("role")
@@ -322,9 +331,12 @@ class Handler(BaseHTTPRequestHandler):
                                              "who": tag.replace("_", " "),
                                              "text": txt})
                                 continue
+                            commentary = role == "assistant" and pay.get("phase") == "commentary"
                             rows.append({"ts": ts,
-                                         "cls": "user" if role == "user" else "agent",
-                                         "who": "you" if role == "user" else "codex",
+                                         "cls": "user" if role == "user" else
+                                                ("rsn" if commentary else "agent"),
+                                         "who": "you" if role == "user" else
+                                                ("codex · thinking" if commentary else "codex"),
                                          "text": txt})
                         elif pt == "agent_message":
                             txt = text_of(pay.get("content"))
@@ -357,7 +369,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._send(200, json.dumps({"rows": [], "error": str(e)}).encode())
 
-        return self._send(200, json.dumps({"rows": rows, "count": len(rows)}).encode())
+        warning = (f"source journal contains {timestamp_inversions} timestamp "
+                   "inversion(s); displayed order follows source provenance"
+                   if timestamp_inversions else "")
+        return self._send(200, json.dumps({"rows": rows, "count": len(rows),
+                                          "revision": revision,
+                                          "journalWarning": warning}).encode())
 
     def _itemtimes(self):
         """Real per-message timestamps, from the thread's rollout JSONL.

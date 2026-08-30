@@ -295,13 +295,14 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("optimisticEchoesMissingFromTranscript", render)
         self.assertIn('add("user",entry.who,entry.text,entry.at)', render)
 
-    def test_live_item_start_does_not_render_empty_transient_rows(self):
-        events = self.html.split('else if(meth==="item/started")', 1)[1].split(
+    def test_live_item_start_reserves_protocol_order_without_visible_empty_rows(self):
+        events = self.html.rsplit('else if(meth==="item/started")', 1)[1].split(
             'else if(meth==="item/completed")', 1)[0]
-        self.assertIn("if(/commandExecution|exec/i.test(ty)) renderItem(p.item)", events)
+        self.assertIn("renderItem(p.item,p.startedAtMs,{reserve:true})", events)
+        self.assertIn('if(!/^user/i.test', events)
         self.assertNotIn("reasonEl=", events)
         self.assertNotIn("streamEl=", events)
-        self.assertNotIn("renderItem(it)", events)
+        self.assertIn('.msg.pending{display:none}', self.html)
 
     def test_removed_transcript_cache_hook_is_not_called(self):
         self.assertNotIn("txUpdateLast", self.html)
@@ -325,13 +326,13 @@ class UiStaticTests(unittest.TestCase):
         writes = [line.strip() for line in self.html.splitlines()
                   if "logEl.scrollTop=logEl.scrollHeight" in line
                   and "wlogEl" not in line]
-        self.assertGreaterEqual(len(writes), 4)
+        self.assertGreaterEqual(len(writes), 2)
         self.assertTrue(all(line.startswith("if(stick)") for line in writes), writes)
 
     def test_large_command_updates_and_approvals_preserve_scroll_intent(self):
-        command = self.html.split("if(key&&itemEls[key])", 1)[1].split(
-            "const stick=atBottom()", 1)[0]
-        self.assertIn("UIContracts.mutatePreservingTail(logEl", command)
+        upsert = self.html.split("function upsertItem", 1)[1].split(
+            "function renderItem", 1)[0]
+        self.assertIn("UIContracts.mutatePreservingTail(logEl", upsert)
         approval = self.html.split("function approval(", 1)[1].split(
             "/* ---------- reconcile", 1)[0]
         self.assertIn("UIContracts.mutatePreservingTail(logEl", approval)

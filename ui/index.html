@@ -111,6 +111,7 @@ button{font:inherit}
 .iconbtn.on{color:var(--accent);border-color:var(--accent)}
 #log{flex:1;overflow-y:auto;padding:20px 22px;min-height:0}
 .msg{margin-bottom:15px;max-width:840px}
+.msg.pending{display:none}
 .who{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim2);
      margin-bottom:4px;display:flex;gap:7px;align-items:baseline}
 .who .ts{text-transform:none;letter-spacing:0;opacity:.55;font-variant-numeric:tabular-nums}
@@ -714,63 +715,104 @@ function setBusy(b){
 }
 function textOf(it){
   if(typeof it.text==="string") return it.text;
-  if(Array.isArray(it.content)) return it.content.map(c=>c.text||c.content||"").join("");
+  if(Array.isArray(it.content)) return it.content.map(c=>
+    typeof c==="string"?c:(c.text||c.content||"")).join("");
+  if(Array.isArray(it.summary)) return it.summary.join("");
   if(typeof it.message==="string") return it.message;
   return "";
 }
-function renderItem(it,ts){
+function upsertItem(it,cls,who,text,ts,{hidden=false,preserve=false}={}){
+  const key=it.id||it.itemId;
+  let item=key&&itemEls[key], body;
+  const mutate=()=>{
+    if(!item){
+      body=add(cls,who,text,ts); item=body.parentElement;
+      if(key){ item.dataset.itemId=key; itemEls[key]=item; }
+    }else{
+      body=item.querySelector(".body");
+      item.className="msg "+cls;
+      item.querySelector(".who span").textContent=who;
+      const existing=body.dataset.raw||body.textContent||"";
+      const next=(preserve&&!text)?existing:(text||"");
+      body.classList.remove("md"); delete body.dataset.raw;
+      body.textContent=next;
+      if((cls==="agent"||cls==="rsn")&&next){
+        body.dataset.raw=next; renderMd(body);
+      }
+    }
+    item.classList.toggle("pending",hidden&&!(body.dataset.raw||body.textContent));
+    return body;
+  };
+  return item?UIContracts.mutatePreservingTail(logEl,mutate):mutate();
+}
+function renderItem(it,ts,{reserve=false,preserve=false}={}){
   const ty=String(it.type||it.itemType||"");
-  if(/^user/i.test(ty)) return add("user","you",textOf(it)||JSON.stringify(it).slice(0,600),ts);
+  if(/^user/i.test(ty)) return upsertItem(it,"user","you",
+    textOf(it)||JSON.stringify(it).slice(0,600),ts);
   if(/agentMessage|agent_message/i.test(ty)){
     const ph=it.phase||"";   // commentary = thinking aloud, final_answer = the result
-    return add(ph==="commentary"?"rsn":"agent",
-               ph==="commentary"?"codex \u00b7 thinking":"codex", textOf(it), ts);
+    const text=textOf(it);
+    return upsertItem(it,ph==="commentary"?"rsn":"agent",
+      ph==="commentary"?"codex \u00b7 thinking":"codex",text,ts,
+      {hidden:(reserve||preserve)&&!text,preserve});
   }
-  if(/reasoning/i.test(ty)){ const t=textOf(it); return t?add("rsn","thinking",t,ts):null; }
+  if(/reasoning/i.test(ty)){
+    const text=textOf(it);
+    return upsertItem(it,"rsn","thinking",text,ts,{hidden:!text,preserve});
+  }
   if(/commandExecution|exec/i.test(ty)){
     const cmd=it.command||it.commandLine||(it.parsedCmd&&JSON.stringify(it.parsedCmd))||"";
     const out=it.aggregatedOutput||it.output||it.stdout||"";
     const st=it.status||it.exitCode;
     const text="$ "+String(cmd)+(out?"\n\n"+String(out).slice(0,6000):"");
-    const key=it.id||it.itemId;
-    // item/started then item/completed arrive for the SAME command -- update
-    // that row in place. Other item kinds stay invisible until content exists.
-    if(key&&itemEls[key]){
-      const item=itemEls[key], body=item.querySelector(".body");
-      return UIContracts.mutatePreservingTail(logEl,()=>{
-        body.textContent=text;
-        item.querySelector(".who span").textContent=
-          "command"+(st!==undefined&&st!==null?" \u00b7 "+st:"");
-        return body;
-      });
-    }
-    const body=add("cmd","command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts);
-    if(key) itemEls[key]=body.parentElement;
-    return body;
+    return upsertItem(it,"cmd",
+      "command"+(st!==undefined&&st!==null?" \u00b7 "+st:""),text,ts,
+      {hidden:reserve&&!cmd});
   }
   if(/fileChange|patch|applyPatch/i.test(ty)){
-    const f=(it.changes||it.files||[]).map?.(x=>x.path||x).join("\n")||JSON.stringify(it).slice(0,900);
-    return add("tool","file change",f,ts);
+    const changes=it.changes||it.files||[];
+    const text=changes.map?.(x=>x.path||x).join("\n")||
+      (reserve?"":JSON.stringify(it).slice(0,900));
+    return upsertItem(it,"tool","file change",text,ts,{hidden:reserve&&!text});
   }
   if(/webSearch/i.test(ty)){
     const q=it.query||it.q||(it.action&&it.action.query)||"";
     const n=(it.results||it.sources||[]).length;
-    return add("tool","web search", q?(q+(n?`\n\n${n} result(s)`:"")):JSON.stringify(it).slice(0,400), ts);
+    const text=q?(q+(n?`\n\n${n} result(s)`:"")):
+      (reserve?"":JSON.stringify(it).slice(0,400));
+    return upsertItem(it,"tool","web search",text,ts,{hidden:reserve&&!text});
   }
   if(/mcp|toolCall|dynamicTool/i.test(ty)){
     const nm=it.toolName||it.name||it.tool||"tool";
     const args=it.arguments||it.args||it.input;
-    return add("tool",String(nm),
-      args?(typeof args==="string"?args:JSON.stringify(args,null,1)).slice(0,1200):"", ts);
+    const text=args?(typeof args==="string"?args:JSON.stringify(args,null,1)).slice(0,1200):"";
+    return upsertItem(it,"tool",String(nm),text,ts,{hidden:reserve&&!text});
   }
   if(/todo|plan/i.test(ty)){
     const items=(it.items||it.todos||[]);
-    if(items.length) return add("tool","plan",
-      items.map(x=>`${x.status==="completed"?"[x]":x.status==="inProgress"?"[~]":"[ ]"} ${x.text||x.title||x}`).join("\n"), ts);
+    const text=items.map(x=>`${x.status==="completed"?"[x]":x.status==="inProgress"?"[~]":"[ ]"} ${x.text||x.title||x}`).join("\n");
+    return upsertItem(it,"tool","plan",text,ts,{hidden:reserve&&!text});
   }
-  if(/error/i.test(ty)) return add("err",ty,textOf(it)||JSON.stringify(it).slice(0,600),ts);
+  if(/error/i.test(ty)) return upsertItem(it,"err",ty,
+    textOf(it)||JSON.stringify(it).slice(0,600),ts);
   // unknown item type: show the type plainly, payload collapsed
-  return add("tool",ty||"item",JSON.stringify(it,null,1).slice(0,900),ts);
+  const text=reserve?"":JSON.stringify(it,null,1).slice(0,900);
+  return upsertItem(it,"tool",ty||"item",text,ts,{hidden:reserve});
+}
+
+function appendItemDelta(itemId,{cls="agent",who="codex",delta=""}={}){
+  if(!itemId) return null;
+  let item=itemEls[itemId], body;
+  if(!item){
+    body=upsertItem({id:itemId},cls,who,"",null,{hidden:true});
+    item=body.parentElement;
+  }else body=item.querySelector(".body");
+  return UIContracts.mutatePreservingTail(logEl,()=>{
+    item.classList.remove("pending");
+    body.dataset.raw=(body.dataset.raw||body.textContent||"")+delta;
+    body.textContent=body.dataset.raw;
+    return body;
+  });
 }
 
 /* ---------- protocol pane ---------- */
@@ -1252,6 +1294,7 @@ function refreshMetaAfterTurnStart(id){
    Codex sub-agents are separate threads. Resuming one subscribes this
    connection to its events, so both conversations stream side by side. */
 let agentCur=null;
+const aItemEls={};
 function aAdd(cls,who,text){
   const d=document.createElement("div"); d.className="msg "+cls;
   const w=document.createElement("div"); w.className="who";
@@ -1263,21 +1306,58 @@ function aAdd(cls,who,text){
   d.append(w,b); $("#alog").append(d); $("#alog").scrollTop=$("#alog").scrollHeight;
   return b;
 }
-let aStream=null;
-function aRenderItem(it){
+function aUpsertItem(it,cls,who,text,{hidden=false,preserve=false}={}){
+  const key=it.id||it.itemId;
+  let item=key&&aItemEls[key], body;
+  if(!item){
+    body=aAdd(cls,who,text); item=body.parentElement;
+    if(key){ item.dataset.itemId=key; aItemEls[key]=item; }
+  }else{
+    body=item.querySelector(".body");
+    item.className="msg "+cls;
+    item.querySelector(".who span").textContent=who;
+    if(!(preserve&&!text)) body.textContent=text||"";
+  }
+  item.classList.toggle("pending",hidden&&!body.textContent);
+  return body;
+}
+function aRenderItem(it,{reserve=false,preserve=false}={}){
   const ty=String(it.type||"");
-  if(/^user/i.test(ty))            return aAdd("user","you",textOf(it));
-  if(/agentMessage/i.test(ty))     return aAdd("agent","agent",textOf(it));
-  if(/reasoning/i.test(ty)){ const t=textOf(it); return t?aAdd("rsn","thinking",t):null; }
+  if(/^user/i.test(ty)) return aUpsertItem(it,"user","you",textOf(it));
+  if(/agentMessage/i.test(ty)){
+    const text=textOf(it);
+    return aUpsertItem(it,"agent","agent",text,
+      {hidden:(reserve||preserve)&&!text,preserve});
+  }
+  if(/reasoning/i.test(ty)){
+    const text=textOf(it);
+    return aUpsertItem(it,"rsn","thinking",text,
+      {hidden:!text,preserve});
+  }
   if(/commandExecution|exec/i.test(ty)){
     const cmd=it.command||it.commandLine||"";
     const out=it.aggregatedOutput||it.output||"";
-    return aAdd("cmd","command","$ "+cmd+(out?"\n\n"+String(out).slice(0,2500):""));
+    return aUpsertItem(it,"cmd","command",
+      "$ "+cmd+(out?"\n\n"+String(out).slice(0,2500):""),
+      {hidden:reserve&&!cmd});
   }
-  return aAdd("tool",ty||"item",JSON.stringify(it).slice(0,500));
+  return aUpsertItem(it,"tool",ty||"item",
+    reserve?"":JSON.stringify(it).slice(0,500),{hidden:reserve});
+}
+function aAppendDelta(itemId,delta){
+  if(!itemId) return;
+  let item=aItemEls[itemId], body;
+  if(!item){
+    body=aUpsertItem({id:itemId},"agent","agent","",{hidden:true});
+    item=body.parentElement;
+  }else body=item.querySelector(".body");
+  item.classList.remove("pending");
+  body.textContent+=delta;
+  $("#alog").scrollTop=$("#alog").scrollHeight;
 }
 async function openAgent(id,nickname){
-  agentCur=id; aStream=null;
+  agentCur=id;
+  for(const key in aItemEls) delete aItemEls[key];
   $("#alog").innerHTML="";
   $("#apane").classList.add("on");
   $("#aTitle").textContent=nickname||id.slice(0,8);
@@ -1410,12 +1490,13 @@ function askConfirm(msg){
    former open_ cleared #log before two network requests; reconciliation after
    every completed turn therefore left a conspicuous blank pane while it
    fetched the same conversation again. */
-function renderTranscript(rows,{atEnd=true,scrollTop=0}={}){
+function renderTranscript(rows,{atEnd=true,scrollTop=0,revision="",journalWarning=""}={}){
   const staging=document.createDocumentFragment();
   logTarget=staging;
   for(const k in itemEls) delete itemEls[k];
   replaying=true;
   try{
+    if(journalWarning) add("err","journal warning",journalWarning,null);
     for(const row of rows){
       const ms=Date.parse(row.ts);
       if(row.cls==="scaffold"){
@@ -1444,6 +1525,7 @@ function renderTranscript(rows,{atEnd=true,scrollTop=0}={}){
   }
   logEl.replaceChildren(staging);
   renderedFromRollout=rows.length;
+  transcriptRevision=revision;
   logEl.scrollTop=atEnd?logEl.scrollHeight:scrollTop;
 }
 
@@ -1472,10 +1554,10 @@ async function open_(id){
   // ordered, timestamped, and complete, including tool calls and their output
   // (which thread/turns/list does not replay). No client-side cache: that
   // workaround was what duplicated, misordered and mis-stamped messages.
-  let rows=[];
+  let rows=[], revision="", journalWarning="";
   try{
     const t=await (await fetch("/transcript?id="+encodeURIComponent(id))).json();
-    rows=t.rows||[];
+    rows=t.rows||[]; revision=t.revision||""; journalWarning=t.journalWarning||"";
   }catch(e){}
   if(generation!==openGeneration||cur!==id) return;
 
@@ -1506,6 +1588,7 @@ async function open_(id){
   return true;
 }
 let renderedFromRollout=0;
+let transcriptRevision="";
 
 /* ---------- new thread ---------- */
 window.openNewThread=()=>{
@@ -1888,18 +1971,19 @@ function approval(id,method,params){
 let reconciling=false;
 async function reconcile(){
   if(!cur || reconciling) return;
-  // Never replace nodes that streamEl/reasonEl still point into. A forced
-  // focus refresh used to detach those nodes mid-turn, so later deltas were
-  // appended invisibly. Completion and the idle poll will reconcile safely.
+  // Do not replace the item-id map while a turn is streaming. Completion and
+  // the idle poll reconcile against the rollout safely.
   if(busy) return;
   reconciling=true;
   try{
     const t=await (await fetch("/transcript?id="+encodeURIComponent(cur))).json();
     const rows=t.rows||[], n=rows.length;
-    if(n!==renderedFromRollout){
+    const revision=t.revision||"";
+    if((revision&&revision!==transcriptRevision)||(!revision&&n!==renderedFromRollout)){
       const atEnd=logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<80;
       const previousTop=logEl.scrollTop;
-      renderTranscript(rows,{atEnd,scrollTop:previousTop});
+      renderTranscript(rows,{atEnd,scrollTop:previousTop,revision,
+        journalWarning:t.journalWarning||""});
     }
   }catch(e){}
   finally{ reconciling=false; }
@@ -1956,25 +2040,28 @@ es.onmessage=async ev=>{
   // events belonging to the sub-agent shown in the side pane
   if(p.threadId&&agentCur&&p.threadId===agentCur){
     if(meth==="item/agentMessage/delta"){
-      if(!aStream) aStream=aAdd("agent","agent","");
-      aStream.textContent+=(p.delta??p.text??"");
-      $("#alog").scrollTop=$("#alog").scrollHeight;
+      aAppendDelta(p.itemId,p.delta??p.text??"");
+    } else if(meth==="item/started"){
+      aRenderItem(p.item||{},{reserve:true});
     } else if(meth==="item/completed"){
-      const it=p.item||{};
-      if(/agentMessage/i.test(String(it.type||""))) aStream=null; else aRenderItem(it);
-    } else if(meth==="turn/completed"||meth==="turn/failed"){ aStream=null; }
+      aRenderItem(p.item||{},{preserve:true});
+    }
     return;
   }
+  const threadScoped=/^(turn\/|item\/|thread\/)/.test(meth||"");
   const threadRoute=UIContracts.threadEventRoute({eventThreadId:p.threadId,
     currentThreadId:cur,viewReady:threadViewReady});
-  if(threadRoute==="not-ready"||threadRoute==="other"){
+  // Current protocol schemas require threadId on turn/item notifications. If
+  // a stale server omits it during reload, never paint that event into the
+  // unbound "No thread" pane; the rollout reconciliation remains canonical.
+  if((threadScoped&&!p.threadId)||threadRoute==="not-ready"||threadRoute==="other"){
     if(/^(turn\/(completed|failed|started)|thread\/(status|project|queue|closed|archived|unarchived|deleted))/.test(meth||""))
       loadThreads();
     return;
   }
 
   if(meth==="turn/started"){
-    setBusy(true); streamEl=null; reasonEl=null;
+    setBusy(true);
     curTurn=(p.turn&&p.turn.id)||p.turnId||curTurn;
     if(cur) refreshMetaAfterTurnStart(cur);
   }
@@ -1986,27 +2073,22 @@ es.onmessage=async ev=>{
           meth==="turn/failed"?"failed":"ended");
       }
     }
-    streamEl=null; reasonEl=null; curTurn=null; loadThreads();
+    curTurn=null; loadThreads();
     if(cur){ loadMeta(cur); loadAgents(); setTimeout(()=>reconcile(),1200); }
     if(meth==="turn/failed") add("err","turn failed",JSON.stringify(p).slice(0,500));
   }
   else if(meth==="item/agentMessage/delta"){
-    const stick=atBottom();
-    if(!streamEl) streamEl=add("agent","codex","");
-    streamEl.dataset.raw=(streamEl.dataset.raw||"")+(p.delta??p.text??"");
-    streamEl.textContent=streamEl.dataset.raw;   // plain while streaming: half-written
-    if(stick) logEl.scrollTop=logEl.scrollHeight; // markdown renders wrong mid-token
+    appendItemDelta(p.itemId,{delta:p.delta??p.text??""});
   }
   else if(/reasoning.*delta/i.test(meth||"")){
-    const stick=atBottom();
-    if(!reasonEl) reasonEl=add("rsn","thinking","");
-    reasonEl.dataset.raw=(reasonEl.dataset.raw||"")+(p.delta??p.text??"");
-    reasonEl.textContent=reasonEl.dataset.raw;
-    if(stick) logEl.scrollTop=logEl.scrollHeight;
+    appendItemDelta(p.itemId,{cls:"rsn",who:"thinking",
+      delta:p.delta??p.text??""});
   }
   else if(meth==="item/started"){
-    const ty=String((p.item||{}).type||"");
-    if(/commandExecution|exec/i.test(ty)) renderItem(p.item);
+    // Reserve protocol order immediately, but keep genuinely empty items
+    // invisible until a delta or completion gives them content.
+    if(!/^user/i.test(String((p.item||{}).type||"")))
+      renderItem(p.item,p.startedAtMs,{reserve:true});
   }
   else if(meth==="item/completed"){
     const it=p.item||{}; const ty=String(it.type||"");
@@ -2018,15 +2100,10 @@ es.onmessage=async ev=>{
       if(!consumeOptimisticUser(p.threadId,it)) renderItem(it);
       return;
     }
-    if(/agentMessage|agent_message/i.test(ty)){
-      const stick=atBottom(); renderMd(streamEl); streamEl=null;
-      if(stick) logEl.scrollTop=logEl.scrollHeight;
-    }
-    else if(/reasoning/i.test(ty)){
-      const stick=atBottom(); renderMd(reasonEl); reasonEl=null;
-      if(stick) logEl.scrollTop=logEl.scrollHeight;
-    }
-    else renderItem(it);
+    // A few protocol versions complete streamed prose with an empty content
+    // array. Preserve the itemId-keyed deltas in that case; a non-empty
+    // completion remains authoritative.
+    renderItem(it,p.completedAtMs,{preserve:true});
   }
   else if(/^thread\/(started|created|archived|unarchived|deleted|closed|status\/changed|name|queue\/changed)/.test(meth||"")){
     if(meth==="thread/closed") setBusy(false);
