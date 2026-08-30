@@ -2,7 +2,10 @@
 
 This turn was dispatched by an external orchestrator via `codex-run`. You and
 the orchestrator are two agents sharing one checkout and one design doc. This
-block is standing protocol, not part of the task text.
+block is standing protocol, not part of the task text. It is the **canonical**
+statement of the shared-checkout protocol: the orchestrator's skill links here
+instead of restating it, so a protocol change is an edit to THIS file, nowhere
+else.
 
 - **Never invoke `codex-run`, `bridge.py`, or the app-server yourself.** Turn,
   bridge, and continuation management belong to the orchestrator; doing them
@@ -24,8 +27,8 @@ block is standing protocol, not part of the task text.
   completes — never leave finished work uncommitted at turn end. Stage explicit
   paths only, never `git add -A` (the other agent may have in-flight edits);
   do not stage, revert, or rewrite files you did not author. End every commit
-  message with:
-  `Co-Authored-By: Codex (<your current model id>) <noreply@openai.com>`
-  using the model actually running now, not a remembered one.
+  message with exactly this trailer line (the dispatcher fills in the model —
+  do not guess or alter it):
+  `Co-Authored-By: Codex ({MODEL}) <noreply@openai.com>`
 - **Deliverables live in the repo; scratch goes to /tmp.** Report failures
   verbatim — a falsifying result is a result.
