@@ -216,3 +216,20 @@ the UI or replaced with a fresh one. And do NOT "fix" the symptom by touching
 the repo's filesystem — stripping `.git`'s sandbox ACL / xattrs (`com.apple.macl`)
 is out of scope, doesn't close the approval gap, and just corrupts the sandbox
 metadata (restore it from a backup if you already did).
+
+## A silenced guard is no guard: the orchestrator bulldozed the hold it built
+
+*Rule: "Take the tree lock", and Hard rule via CODEX-TURN.md.*
+
+Hours after `send` gained its automatic turn-long lock hold, the orchestrator's
+own commit ritual — `lock acquire ... >/dev/null 2>&1; edit; commit; lock
+release` — ran repeatedly during a live render turn. The acquire correctly
+returned BUSY every time; the output suppression swallowed the refusal, the
+edits proceeded anyway, and `lock release` (which then deleted ANY holder's
+lock when called without an owner) destroyed the dispatcher's hold on the
+first cycle. Every later cycle "acquired" cleanly against a tree its own
+first pass had unprotected. Only disjoint file sets prevented interleaved
+commits. Two fixes: `lock release` now REFUSES to break a live foreign hold
+(exit 1; `--force` for deliberate breaks), and the standing rule for
+operators: **never redirect a guard's output to /dev/null** — a BUSY you
+cannot see is a hard stop you will not make.
