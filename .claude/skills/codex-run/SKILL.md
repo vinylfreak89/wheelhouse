@@ -6,12 +6,13 @@ description: Hand work to OpenAI Codex from Claude and watch it run in the Wheel
 # Running work on Codex
 
 > **Audience: the external orchestrator driving Codex — not Codex itself.**
-> A Codex agent handed this file must NOT invoke `codex-run`, start or manage
-> the bridge/app-server, or wait on its own turn. Those are the orchestrator's
-> job, and doing them from inside a turn is self-invocation against the bridge
-> that owns your own app-server. The methodology here — structural blindness,
-> prespecification, output contracts, cwd and write scoping — does apply to you.
-> See "Skill roots" for why this skill is deliberately not registered for Codex.
+> Codex's rules arrive with every dispatched turn as `./CODEX-TURN.md` — the
+> canonical shared-checkout protocol; this file never restates it. A Codex
+> agent handed THIS file anyway: your conduct rules are in CODEX-TURN.md (start
+> with "never invoke `codex-run`"); the methodology here — structural
+> blindness, prespecification, output contracts, cwd and write scoping — does
+> also apply to you. See "Skill roots" for why this skill is deliberately not
+> registered for Codex.
 
 ## Every rule, in one place
 
@@ -174,17 +175,16 @@ held they warn and proceed rather than blocking — set `LOCK_WAIT=300` to wait
 instead. Queued turns run with no live dispatcher process, so no lock is held
 for them; `CODEX-TURN.md` tells Codex to acquire it itself in that case.
 
-**It is advisory.** Treat a held lock as a hard stop and wait, rather than
-reasoning that your edit is small enough not to matter.
+The shared mechanics — lockfile path and format, hard-stop-on-live-holds,
+narrow staging, commit conventions — are stated ONCE, in `./CODEX-TURN.md`
+(injected into every turn), and bind BOTH agents. This section covers only the
+orchestrator's CLI operations on top of them.
 
 **Staleness has two forms, and conflating them breaks it.** A turn holds the
 lock inside a long-lived process, so a dead pid means abandoned. A manual
 `acquire` returns to the shell immediately, so its pid is gone by the next
 command — that is normal, not stale. Manual holds record no pid and expire on
 age (`LOCK_MAX_AGE`, default 3600s).
-
-**Commit narrowly.** `git add <explicit paths>`, never `-A`, whenever the other
-side might have the tree open.
 
 *Why: `./INCIDENTS.md`, "Three ways an unlocked shared checkout went wrong".*
 
@@ -230,9 +230,8 @@ the first dispatch into any project, check that `AGENTS.md` exists**:
   into two documents that drift; the symlink keeps one source of truth.
 - **If a regular (non-symlink) `AGENTS.md` already exists, STOP and surface it
   to the owner** — replacing an owner's file is not your call.
-- **Verify the link survives instruction edits.** Common atomic-write paths
-  replace a symlink with a regular file and silently fork the instructions;
-  after any edit to either name, `ls -la AGENTS.md` must still show the link.
+- The standing invariant — never replace the symlink, verify it survives
+  instruction edits — is stated in `./CODEX-TURN.md` and binds both agents.
 
 **The empty case is the trap that motivated this rule:** a repo WITHOUT
 `AGENTS.md` gives Codex zero standing instructions, while the orchestrator —
@@ -241,12 +240,14 @@ runs an entire project with no lock discipline, no commit conventions, and no
 trailers, and every symptom gets patched ad hoc in dispatch text.
 
 Every dispatched turn additionally carries `./CODEX-TURN.md` (auto-injected by
-the CLI in `send`/`task`/`queue`/`say`; `CODEX_NO_PROTOCOL=1` disables): the
-Codex-facing shared-checkout protocol — tree-lock mechanics, commit-as-you-go
-with Codex's own model trailer, narrow `git add`, never replacing the AGENTS.md
-symlink, never self-invoking `codex-run`. Keep that file terse (it costs tokens
-on every turn) and Codex-facing (never orchestrator driving instructions —
-see "Skill roots").
+the CLI in `send`/`task`/`queue`/`say`; `CODEX_NO_PROTOCOL=1` disables). That
+file is the **canonical shared-checkout protocol** — do not restate its
+contents here or in dispatches; change the protocol by editing it. The CLI
+substitutes the lockfile path and the thread's current model into it at
+dispatch time (Codex does not know its own model id — verified — so the
+trailer is filled by the dispatcher, never guessed by the agent). Keep the file
+terse (it costs tokens on every turn) and Codex-facing (never orchestrator
+driving instructions — see "Skill roots").
 
 ## Do NOT restate what Codex already loads
 
@@ -264,10 +265,9 @@ A dispatch should carry ONLY what is genuinely new to this task:
   3. anything that CONTRADICTS or narrows the standing instructions
   4. the output contract
 
-Before asking Codex to change an instruction file, inspect whether it is a
-symlink and edit the real target rather than replacing the link. Any current
-embargoes or special relationships between local instruction files belong in
-`LOCAL.md`, not here.
+Any current embargoes or special relationships between local instruction files
+belong in `LOCAL.md`, not here. (Instruction-file symlink handling is in
+`./CODEX-TURN.md` and "The shared model" above.)
 
 ## Orchestrating well — Codex cannot see your context
 
