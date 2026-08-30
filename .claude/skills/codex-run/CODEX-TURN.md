@@ -27,8 +27,7 @@ else.
   completes — never leave finished work uncommitted at turn end. Stage explicit
   paths only, never `git add -A` (the other agent may have in-flight edits);
   do not stage, revert, or rewrite files you did not author. End every commit
-  message with exactly this trailer line (the dispatcher fills in the model —
-  do not guess or alter it):
-  `Co-Authored-By: Codex ({MODEL}) <noreply@openai.com>`
+  message with exactly this trailer line, once (the upstream Codex standard):
+  `Co-authored-by: Codex <noreply@openai.com>`
 - **Deliverables live in the repo; scratch goes to /tmp.** Report failures
   verbatim — a falsifying result is a result.

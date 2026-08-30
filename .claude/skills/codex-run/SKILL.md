@@ -243,11 +243,17 @@ Every dispatched turn additionally carries `./CODEX-TURN.md` (auto-injected by
 the CLI in `send`/`task`/`queue`/`say`; `CODEX_NO_PROTOCOL=1` disables). That
 file is the **canonical shared-checkout protocol** — do not restate its
 contents here or in dispatches; change the protocol by editing it. The CLI
-substitutes the lockfile path and the thread's current model into it at
-dispatch time (Codex does not know its own model id — verified — so the
-trailer is filled by the dispatcher, never guessed by the agent). Keep the file
-terse (it costs tokens on every turn) and Codex-facing (never orchestrator
-driving instructions — see "Skill roots").
+substitutes the lockfile path at dispatch time. The commit trailer in it is the
+**fixed upstream Codex standard, verbatim** —
+`Co-authored-by: Codex <noreply@openai.com>` — deliberately WITHOUT a model id:
+that matches openai/codex's own git-attribution ext (source-verified), whose
+dedupe rule ("do not duplicate this trailer") makes our injected line compose
+safely with native attribution when Codex's server-side policy enables it. Do
+not add a model id: Codex cannot state its own model, and deriving it
+dispatcher-side is unreliable (thread settings can change mid-turn; queued
+turns bake stale values). Keep the file terse (it costs tokens on every turn)
+and Codex-facing (never orchestrator driving instructions — see "Skill
+roots").
 
 ## Do NOT restate what Codex already loads
 
