@@ -183,7 +183,8 @@ function harness(threadMeta) {
 
   return {
     elements, fetched, sandbox,
-    // open_ fires loadMeta without awaiting it; drain the microtask queue.
+    // open_ awaits loadMeta so the persisted cwd/settings are resolved before
+    // the thread can accept a turn. Drain follow-up thread/read work too.
     async select(id) {
       await sandbox.open_(id);
       for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r));
@@ -226,6 +227,8 @@ test("switching threads re-reads the newly selected thread's settings", async ()
     "the approvals control must read thread B, not thread A");
   assert.equal(ui.elements["#cSbx"].title, sandboxFor("on"),
     "the sandbox chip must read thread B, not thread A");
+  assert.equal(ui.sandbox.curInfo.cwd, "/work/b",
+    "the persisted cwd must replace thread/resume's stale loaded cwd");
 
   assert.ok(ui.fetched.includes("/threadmeta?id=thread-b"),
     "selecting a thread must fetch that thread's effective settings");

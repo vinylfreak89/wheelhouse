@@ -140,6 +140,19 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn('mk("Working directory…"', self.html)
         self.assertIn("p.threadSettings.cwd", self.html)
 
+    def test_every_turn_carries_the_resolved_thread_working_directory(self):
+        contracts = self.html.split("WHEELHOUSE_UI_CONTRACTS_START", 1)[1].split(
+            "WHEELHOUSE_UI_CONTRACTS_END", 1)[0]
+        turn = contracts.split("turnStart(", 1)[1].split(
+            "metaRefreshDelays", 1)[0]
+        self.assertIn("if(cwd) p.cwd=cwd", turn)
+        sent = self.html.split("async function send()", 1)[1].split(
+            '$("#send").onclick=send', 1)[0]
+        self.assertIn('cwd:curInfo.cwd||cwdCache[threadId]||""', sent)
+        opened = self.html.split("async function open_(id)", 1)[1].split(
+            "/* ---------- new thread", 1)[0]
+        self.assertIn("await loadMeta(id)", opened)
+
     def test_active_thread_can_route_approvals_to_auto_review(self):
         self.assertIn('id="cAppr"', self.html)
         self.assertIn('mk("Approval routing…"', self.html)

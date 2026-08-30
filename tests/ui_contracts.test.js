@@ -76,6 +76,7 @@ test("turn/start includes every selected override", () => {
   const payload = contracts.turnStart({
     threadId: "thread-1",
     text: "continue",
+    cwd: "  /work/current  ",
     model: "gpt-test",
     effort: "high",
     approvalPolicy: "on-request",
@@ -84,6 +85,7 @@ test("turn/start includes every selected override", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(payload)), {
     threadId: "thread-1",
     input: [{type: "text", text: "continue"}],
+    cwd: "/work/current",
     model: "gpt-test",
     effort: "high",
     approvalPolicy: "on-request",
@@ -94,7 +96,7 @@ test("turn/start includes every selected override", () => {
 
 test("turn/start omits blank overrides instead of clearing sticky values", () => {
   const payload = contracts.turnStart({
-    threadId: "thread-1", text: "continue", model: "", effort: "",
+    threadId: "thread-1", text: "continue", cwd: "", model: "", effort: "",
     approvalPolicy: "", serviceTier: "",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(payload)), {

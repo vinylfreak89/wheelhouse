@@ -394,8 +394,10 @@ const UIContracts=Object.freeze({
   autonomySettings({threadId,mode}){
     return Object.assign({threadId},this.approvalOverrides(mode));
   },
-  turnStart({threadId,text,model,effort,approvalPolicy,serviceTier}){
+  turnStart({threadId,text,cwd,model,effort,approvalPolicy,serviceTier}){
     const p={threadId,input:[{type:"text",text}]};
+    cwd=String(cwd||"").trim();
+    if(cwd) p.cwd=cwd;
     if(model) p.model=model;
     if(effort) p.effort=effort;
     Object.assign(p,this.approvalOverrides(approvalPolicy));
@@ -1191,6 +1193,14 @@ async function loadMeta(id){
     if(fingerprint===renderedMetaFingerprint) return;
     renderedMetaFingerprint=fingerprint;
     curMeta=m;
+    // The app-server can retain a loaded thread's old cwd even after
+    // thread/settings/update has persisted the new value. The state DB is the
+    // value the UI advertises, so it is also the value every turn must send.
+    if(m.cwd){
+      cwdCache[id]=m.cwd;
+      curInfo.cwd=m.cwd;
+      showCwd(m.cwd);
+    }
     chip("#cModel", m.model?("model: "+m.model):null);
     const mm=modelById(m.model);
     const effDef=(mm&&mm.defaultReasoningEffort)||"";
@@ -1474,7 +1484,10 @@ async function open_(id){
   if(th.name) nameCache[id]=th.name;
   if(th.cwd){ cwdCache[id]=th.cwd; }
   showCwd(th.cwd||cwdCache[id]||"");
-  loadMeta(id);
+  // Resolve persisted settings, especially cwd, before this thread can send.
+  // Otherwise the header can advertise the DB value while turn/start omits it
+  // and the app-server silently reuses an older loaded-thread cwd.
+  await loadMeta(id);
   renderTranscript(rows);
 
   threadViewReady=true;
@@ -1583,6 +1596,7 @@ async function send(){
   const optimistic=addOptimisticUser(threadId,t,"you");
   setBusy(true);
   const p=UIContracts.turnStart({threadId,text:t,
+    cwd:curInfo.cwd||cwdCache[threadId]||"",
     model:$("#selModel").value,effort:$("#selEffort").value,
     approvalPolicy:$("#selAppr").value,
     serviceTier:$("#selTier")&&$("#selTier").value});
