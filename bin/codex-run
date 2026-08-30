@@ -459,12 +459,33 @@ def lock_acquire(owner, note="", wait=0, pid=True):
         time.sleep(2); waited += 2
 
 
-def lock_release(owner=None):
+def lock_release(owner=None, force=False):
+    """Release refuses to break another holder's LIVE lock.
+
+    The old behavior deleted the file unconditionally when no owner was given,
+    which let a bystander's routine `lock release` destroy a dispatcher's
+    turn-long hold (observed: an orchestrator's commit ritual, run with output
+    suppressed, repeatedly bulldozed an active render turn's hold). Now: with
+    no owner given, only a stale hold (dead pid, or aged-out manual hold) or
+    one's own may be removed; a live foreign hold requires force=True and a
+    deliberate decision."""
     d = _lock_read()
-    if d and (owner is None or d.get("owner") == owner or not _alive(d.get("pid", -1))):
+    if not d:
+        return False
+    pid = d.get("pid")
+    live = pid is not None and _alive(pid)
+    if not live and pid is None:
+        # manual hold: live until it ages out
+        st = lock_status() or {}
+        live = not st.get("stale")
+    mine = owner is not None and d.get("owner") == owner
+    if force or mine or not live:
         try: os.remove(LOCKFILE)
         except FileNotFoundError: pass
         return True
+    print(f"REFUSING to release live lock held by {d.get('owner')}"
+          f"{f' (pid {pid})' if pid else ''} -- pass --force to break it deliberately",
+          file=sys.stderr)
     return False
 
 
@@ -838,9 +859,15 @@ def main():
             print("acquired" if ok else "BUSY")
             if not ok: sys.exit(1)
         elif sub == "release":
-            print("released" if lock_release() else "not held")
+            owner = None
+            force = "--force" in a
+            rest = [x for x in a[2:] if x != "--force"]
+            if rest: owner = rest[0]
+            ok = lock_release(owner, force=force)
+            print("released" if ok else "not released")
+            if not ok: sys.exit(1)
         else:
-            sys.exit("lock status|acquire [owner] [note]|release")
+            sys.exit("lock status|acquire [owner] [note]|release [owner] [--force]")
     elif c == "project":
         root = claude_project(project_cwd())
         if not root:
