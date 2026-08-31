@@ -443,6 +443,20 @@ const UIContracts=Object.freeze({
     pane.scrollTop=follow?pane.scrollHeight:previousTop;
     return result;
   },
+  errorText(error){
+    if(error===undefined||error===null) return "Unknown API error";
+    if(typeof error==="string") return error;
+    const lines=[];
+    if(error.message) lines.push(String(error.message));
+    if(error.additionalDetails&&error.additionalDetails!==error.message)
+      lines.push(String(error.additionalDetails));
+    const info=error.codexErrorInfo??error.codex_error_info;
+    if(info){
+      const kind=typeof info==="string"?info:(info.type||info.code||JSON.stringify(info));
+      if(kind&&!lines.some(line=>line.includes(kind))) lines.push(`type: ${kind}`);
+    }
+    return lines.join("\n")||JSON.stringify(error);
+  },
   virtualRange({total,start=0,end=0,direction="tail",windowSize=240,
                 chunkSize=80,anchor=null}){
     total=Math.max(0,Number(total)||0);
@@ -635,6 +649,16 @@ const itemEls={};                 // item id -> .msg element, for in-place updat
 const HISTORY_WINDOW=240, HISTORY_CHUNK=80;
 let historyRows=[], historyRange={start:0,end:0}, historyWarning="";
 let historyShiftFrame=0, historyFindQuery="", historyFindIndex=-1;
+const liveErrorKeys=new Set();
+
+function showApiError(label,error,{threadId=cur,turnId=""}={}){
+  const text=UIContracts.errorText(error);
+  const key=`${threadId||""}\n${turnId||""}\n${text}`;
+  if(liveErrorKeys.has(key)) return false;
+  liveErrorKeys.add(key);
+  add("err",label,text);
+  return true;
+}
 
 /* The transcript is rendered from the rollout JSONL via /transcript.
    There is deliberately NO client-side cache: the earlier one duplicated,
@@ -850,6 +874,7 @@ function appendItemDelta(itemId,{cls="agent",who="codex",delta=""}={}){
 function clearTranscriptPane(){
   historyRows=[]; historyRange={start:0,end:0}; historyWarning="";
   historyFindQuery=""; historyFindIndex=-1;
+  liveErrorKeys.clear();
   for(const key in itemEls) delete itemEls[key];
   historyEl.replaceChildren(); liveEl.replaceChildren();
   liveEl.hidden=false;
@@ -1649,6 +1674,7 @@ function askConfirm(msg){
 function renderTranscript(rows,{atEnd=true,scrollTop=0,revision="",journalWarning=""}={}){
   const previousRange=historyRange;
   historyRows=rows; historyWarning=journalWarning;
+  liveErrorKeys.clear();
   for(const k in itemEls) delete itemEls[k];
   liveEl.replaceChildren(); logTarget=liveEl;
   let range=UIContracts.virtualRange({total:rows.length,direction:"tail",
@@ -2262,7 +2288,11 @@ es.onmessage=async ev=>{
     }
     curTurn=null; loadThreads();
     if(cur){ loadMeta(cur); loadAgents(); setTimeout(()=>reconcile(),1200); }
-    if(meth==="turn/failed") add("err","turn failed",JSON.stringify(p).slice(0,500));
+    const turn=p.turn||{};
+    if(meth==="turn/failed"||turn.status==="failed"||turn.error||p.error){
+      showApiError("API error",turn.error||p.error||p,
+        {threadId:p.threadId,turnId:turn.id||p.turnId});
+    }
   }
   else if(meth==="item/agentMessage/delta"){
     appendItemDelta(p.itemId,{delta:p.delta??p.text??""});
@@ -2322,9 +2352,12 @@ es.onmessage=async ev=>{
   }
   else if(/subAgent|spawn|collabAgent/i.test(meth||"")){ loadAgents(); }
   else if(meth==="error"){
-    const detail=(p.error&&p.error.message)||p.error||p;
-    add("err",p.willRetry?"error · retrying":"error",
-        typeof detail==="string"?detail:JSON.stringify(detail).slice(0,800));
+    showApiError(p.willRetry?"error · retrying":"error",p.error||p,
+      {threadId:p.threadId,turnId:p.turnId});
+  }
+  else if(meth==="thread/realtime/error"){
+    showApiError("realtime error",p.message||p.error||p,
+      {threadId:p.threadId,turnId:p.turnId});
   }
   else if(meth==="warning"||meth==="guardianWarning"){
     add("err","warning",p.message||JSON.stringify(p).slice(0,800));

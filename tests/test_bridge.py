@@ -275,6 +275,12 @@ class HandlerContractTests(unittest.TestCase):
                  "payload": {"type": "message", "role": "assistant",
                              "phase": "final_answer",
                              "content": [{"type": "output_text", "text": "done"}]}},
+                {"timestamp": "2026-08-30T02:00:01Z", "type": "event_msg",
+                 "payload": {"type": "task_complete", "last_agent_message": None,
+                             "error": {
+                                 "message": "Selected model is at capacity.",
+                                 "codex_error_info": "server_overloaded",
+                             }}},
             ]
             rollout.write_text("".join(json.dumps(r) + "\n" for r in records),
                                encoding="utf-8")
@@ -286,6 +292,8 @@ class HandlerContractTests(unittest.TestCase):
         self.assertEqual([(r["cls"], r["who"], r["text"]) for r in data["rows"]], [
             ("rsn", "codex · thinking", "working"),
             ("agent", "codex", "done"),
+            ("err", "API error",
+             "Selected model is at capacity.\ntype: server_overloaded"),
         ])
         self.assertTrue(data["revision"])
         self.assertIn("1 timestamp inversion", data["journalWarning"])

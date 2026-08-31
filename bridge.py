@@ -307,6 +307,28 @@ class Handler(BaseHTTPRequestHandler):
                         out += part
             return out
 
+        def error_text(error):
+            if isinstance(error, str):
+                return error
+            if not isinstance(error, dict):
+                return "Unknown API error" if error is None else str(error)
+            lines = []
+            message = error.get("message")
+            if message:
+                lines.append(str(message))
+            details = error.get("additionalDetails")
+            if details and details != message:
+                lines.append(str(details))
+            info = error.get("codexErrorInfo", error.get("codex_error_info"))
+            if info:
+                if isinstance(info, dict):
+                    kind = info.get("type") or info.get("code") or json.dumps(info)
+                else:
+                    kind = str(info)
+                if kind and not any(kind in line for line in lines):
+                    lines.append(f"type: {kind}")
+            return "\n".join(lines) or json.dumps(error)
+
         rows, calls, revision = [], {}, ""
         last_timestamp = None
         timestamp_inversions = 0
@@ -327,14 +349,25 @@ class Handler(BaseHTTPRequestHandler):
                             rec = json.loads(line)
                         except Exception:
                             continue
-                        if rec.get("type") != "response_item":
-                            continue
                         pay = rec.get("payload") or {}
                         pt, ts = pay.get("type"), rec.get("timestamp")
                         if ts:
                             if last_timestamp is not None and ts < last_timestamp:
                                 timestamp_inversions += 1
                             last_timestamp = ts
+
+                        # Terminal API failures are journal events rather than
+                        # response items. Without replaying them, an inactive
+                        # thread only flashes red in the sidebar and opening it
+                        # later gives no explanation for the failed turn.
+                        if rec.get("type") == "event_msg":
+                            if pt == "task_complete" and pay.get("error"):
+                                rows.append({"ts": ts, "cls": "err",
+                                             "who": "API error",
+                                             "text": error_text(pay["error"])})
+                            continue
+                        if rec.get("type") != "response_item":
+                            continue
 
                         if pt == "message":
                             role = pay.get("role")

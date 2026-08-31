@@ -367,6 +367,15 @@ class UiStaticTests(unittest.TestCase):
         self.assertGreaterEqual(len(writes), 2)
         self.assertTrue(all(line.startswith("if(stick)") for line in writes), writes)
 
+    def test_failed_completed_turns_render_the_api_error(self):
+        events = self.html.split("es.onmessage=async ev=>", 1)[1]
+        completion = events.split(
+            'else if(meth==="turn/completed"||meth==="turn/failed")', 1
+        )[1].split('else if(meth==="item/agentMessage/delta")', 1)[0]
+        self.assertIn('turn.status==="failed"', completion)
+        self.assertIn("turn.error||p.error||p", completion)
+        self.assertIn('showApiError("API error"', completion)
+
     def test_large_command_updates_and_approvals_preserve_scroll_intent(self):
         upsert = self.html.split("function upsertItem", 1)[1].split(
             "function renderItem", 1)[0]

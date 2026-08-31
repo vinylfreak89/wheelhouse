@@ -214,6 +214,18 @@ test("large item updates follow the tail without snapping a reader who scrolled 
   assert.equal(reading.scrollTop, 420);
 });
 
+test("API errors retain their message and machine-readable classification", () => {
+  assert.equal(contracts.errorText({
+    message: "Selected model is at capacity. Please try a different model.",
+    codexErrorInfo: {type: "serverOverloaded"},
+  }), "Selected model is at capacity. Please try a different model.\ntype: serverOverloaded");
+  assert.equal(contracts.errorText({
+    message: "request failed", additionalDetails: "upstream returned 503",
+    codex_error_info: "server_overloaded",
+  }), "request failed\nupstream returned 503\ntype: server_overloaded");
+  assert.equal(contracts.errorText("connection closed"), "connection closed");
+});
+
 test("long transcripts mount a bounded sliding window", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(contracts.virtualRange({
     total: 10000, direction: "tail",
