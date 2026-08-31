@@ -1015,9 +1015,13 @@ function wire(dir,rpcName,id,payload,isErr){
   const p=document.createElement("div"); p.className="p"; p.textContent=payload||"";
   d.append(h,p);
   d.onclick=()=>d.classList.toggle("open");
-  wlogEl.append(d);
-  while(wlogEl.children.length>400) wlogEl.firstChild.remove();
-  wlogEl.scrollTop=wlogEl.scrollHeight;
+  const pruneAtTail=UIContracts.nearTail(wlogEl,24);
+  UIContracts.mutatePreservingTail(wlogEl,()=>{
+    wlogEl.append(d);
+    // Removing old rows from above a reader also moves their viewport. Defer
+    // the 400-row trim until they return to the tail.
+    if(pruneAtTail) while(wlogEl.children.length>400) wlogEl.firstChild.remove();
+  },24);
 }
 
 /* ---------- thread list ---------- */

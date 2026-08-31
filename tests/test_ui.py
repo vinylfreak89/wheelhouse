@@ -367,6 +367,13 @@ class UiStaticTests(unittest.TestCase):
         self.assertGreaterEqual(len(writes), 2)
         self.assertTrue(all(line.startswith("if(stick)") for line in writes), writes)
 
+        wire = self.html.split("function wire(", 1)[1].split(
+            "/* ---------- thread list", 1)[0]
+        self.assertIn("UIContracts.mutatePreservingTail(wlogEl", wire)
+        self.assertIn("},24)", wire)
+        self.assertIn("if(pruneAtTail) while", wire)
+        self.assertNotIn("wlogEl.scrollTop=wlogEl.scrollHeight", wire)
+
     def test_failed_completed_turns_render_the_api_error(self):
         events = self.html.split("es.onmessage=async ev=>", 1)[1]
         completion = events.split(
