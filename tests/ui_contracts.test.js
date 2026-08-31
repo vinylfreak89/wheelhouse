@@ -214,6 +214,51 @@ test("large item updates follow the tail without snapping a reader who scrolled 
   assert.equal(reading.scrollTop, 420);
 });
 
+test("long transcripts mount a bounded sliding window", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.virtualRange({
+    total: 10000, direction: "tail",
+  }))), {start: 9760, end: 10000});
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.virtualRange({
+    total: 10000, start: 9760, end: 10000, direction: "earlier",
+  }))), {start: 9680, end: 9920});
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.virtualRange({
+    total: 10000, start: 9680, end: 9920, direction: "later",
+  }))), {start: 9760, end: 10000});
+  assert.deepEqual(JSON.parse(JSON.stringify(contracts.virtualRange({
+    total: 30, direction: "tail",
+  }))), {start: 0, end: 30});
+});
+
+test("a visible tall row can anchor one extra chunk without unbounded growth", () => {
+  const range = contracts.virtualRange({
+    total: 10000, start: 500, end: 740, direction: "later", anchor: 520,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(range)), {start: 520, end: 820});
+  assert.ok(range.end - range.start <= 320);
+
+  const next = contracts.virtualRange({
+    total: 10000, ...range, direction: "later", anchor: 520,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(next)), {start: 580, end: 900});
+  assert.ok(next.end - next.start <= 320);
+});
+
+test("repeated virtual shifts reach both ends without growing the DOM window", () => {
+  const total = 10000;
+  let range = contracts.virtualRange({total, direction: "tail"});
+  while (range.start > 0) {
+    range = contracts.virtualRange({total, ...range, direction: "earlier"});
+    assert.ok(range.end - range.start <= 240);
+  }
+  assert.equal(range.start, 0);
+
+  while (range.end < total) {
+    range = contracts.virtualRange({total, ...range, direction: "later"});
+    assert.ok(range.end - range.start <= 240);
+  }
+  assert.equal(range.end, total);
+});
+
 test("thread events cannot render before the selected transcript is attached", () => {
   assert.equal(contracts.threadEventRoute({
     eventThreadId: "thread-1", currentThreadId: null, viewReady: false,

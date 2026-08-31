@@ -52,6 +52,13 @@ class FakeElement {
     }
     this.scrollHeight = this.children.length * 100;
   }
+  addEventListener() {}
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+  querySelectorAll() { return []; }
+  getBoundingClientRect() { return {top: 0, bottom: 0}; }
   querySelector(selector) {
     if (selector === ".body") return this.children.find(n => n.classList.values().has("body"));
     if (selector === ".who span") {
@@ -64,17 +71,25 @@ class FakeElement {
 
 function harness() {
   const logEl = new FakeElement("div");
+  const historyEl = new FakeElement("div");
   const context = {
     console,
     document: {createElement: tag => new FakeElement(tag)},
     logEl,
+    liveEl: logEl,
+    historyEl,
     logTarget: logEl,
     itemEls: {},
+    historyRows: [], historyRange: {start: 0, end: 0}, historyWarning: "",
+    historyShiftFrame: 0, historyFindQuery: "", historyFindIndex: -1,
+    HISTORY_WINDOW: 240, HISTORY_CHUNK: 80,
+    requestAnimationFrame: () => 1,
     fmtTs: () => "",
     renderMd(el) { el.classList.add("md"); },
     UIContracts: {
       nearTail: () => false,
       mutatePreservingTail(_pane, mutate) { return mutate(); },
+      virtualRange: () => ({start: 0, end: 0}),
     },
     $: () => ({disabled: false}),
     $$: () => [],

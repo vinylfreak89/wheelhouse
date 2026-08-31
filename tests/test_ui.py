@@ -230,7 +230,7 @@ class UiStaticTests(unittest.TestCase):
     def test_answered_prompts_leave_the_pending_tray(self):
         body = self.html.split("function retireApproval", 1)[1].split(
             "function promptError", 1)[0]
-        self.assertIn("logEl.append(d)", body)
+        self.assertIn("liveEl.append(d)", body)
         self.assertIn("delete apprEls[id]", body)
 
     def test_completion_expires_only_prompts_from_the_finished_turn(self):
@@ -254,13 +254,33 @@ class UiStaticTests(unittest.TestCase):
     def test_reconciliation_replaces_offscreen_without_reopening_thread(self):
         render = self.html.split("function renderTranscript", 1)[1].split(
             "let openGeneration", 1)[0]
-        self.assertIn("document.createDocumentFragment()", render)
-        self.assertIn("logEl.replaceChildren(staging)", render)
+        self.assertIn("renderHistoryWindow(range)", render)
+        window = self.html.split("function renderHistoryWindow", 1)[1].split(
+            "function shiftHistory", 1)[0]
+        self.assertIn("document.createDocumentFragment()", window)
+        self.assertIn("historyEl.replaceChildren(staging)", window)
         reconcile = self.html.split("async function reconcile", 1)[1].split(
             "/* ---------- events", 1)[0]
         self.assertIn("renderTranscript(rows", reconcile)
         self.assertIn("if(busy) return", reconcile)
         self.assertNotIn("open_(cur)", reconcile)
+
+    def test_long_transcripts_keep_only_a_bounded_history_window_in_dom(self):
+        self.assertIn('<div id="history"></div><div id="live"></div>', self.html)
+        self.assertIn("const HISTORY_WINDOW=240, HISTORY_CHUNK=80", self.html)
+        window = self.html.split("function renderHistoryWindow", 1)[1].split(
+            "function shiftHistory", 1)[0]
+        self.assertIn("historyRows.slice(nextRange.start,nextRange.end)", window)
+        self.assertIn("historyEl.replaceChildren(staging)", window)
+        self.assertIn("liveEl.hidden=nextRange.end<historyRows.length", window)
+        transcript = self.html.split("function renderTranscript", 1)[1].split(
+            "let openGeneration", 1)[0]
+        self.assertIn("historyRows=rows", transcript)
+        self.assertIn("liveEl.replaceChildren()", transcript)
+        self.assertNotIn("for(const row of rows)", transcript)
+        self.assertIn('logEl.addEventListener("scroll"', self.html)
+        self.assertIn("shiftHistory(\"earlier\")", self.html)
+        self.assertIn("shiftHistory(\"later\")", self.html)
 
     def test_hot_reload_restores_thread_before_accepting_its_live_events(self):
         self.assertNotIn("sessionStorage", self.html)
