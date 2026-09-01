@@ -98,12 +98,21 @@ class ChatIdentityTests(unittest.TestCase):
 class ThreadResolutionTests(unittest.TestCase):
     def setUp(self):
         self.cwd = os.path.abspath(os.getcwd())
+        # Thread-resolution fixtures bind their fake records to this test cwd.
+        # Do not let a real driving Claude session substitute its own project
+        # root and make otherwise deterministic unit tests environment-dependent.
+        self.project_patch = mock.patch.object(
+            codex_run, "claude_project", return_value=self.cwd)
+        self.project_patch.start()
         self.live = [
             {"id": "wrong", "name": "Same title", "cwd": self.cwd,
              "updatedAt": 20},
             {"id": "right", "name": "Renamed by owner", "cwd": self.cwd,
              "updatedAt": 10},
         ]
+
+    def tearDown(self):
+        self.project_patch.stop()
 
     def test_stable_chat_binding_wins_over_title_and_recency(self):
         registry = {"threads": {
