@@ -292,6 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         import glob
         q = parse_qs(urlparse(self.path).query)
         tid = (q.get("id") or [""])[0]
+        known_revision = (q.get("revision") or [""])[0]
         if not tid:
             return self._send(400, b'{"error":"no id"}')
 
@@ -339,6 +340,14 @@ class Handler(BaseHTTPRequestHandler):
             stats = [os.stat(f) for f in files]
             revision = ";".join(
                 f"{stat.st_mtime_ns}:{stat.st_size}" for stat in stats)
+            # Reconciliation asks frequently only to learn whether the rollout
+            # changed. File metadata is enough for the append-only journal;
+            # avoid reparsing hundreds of MB and returning the same multi-MB
+            # JSON snapshot every few seconds while an idle thread is open.
+            if known_revision and known_revision == revision:
+                return self._send(200, json.dumps({
+                    "unchanged": True, "revision": revision,
+                }).encode())
             for f in files:
                 with open(f) as fh:
                     for line in fh:

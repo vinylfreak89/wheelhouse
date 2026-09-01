@@ -214,6 +214,29 @@ test("large item updates follow the tail without snapping a reader who scrolled 
   assert.equal(reading.scrollTop, 420);
 });
 
+test("single-flight polling coalesces overlap into one follow-up", async () => {
+  const releases = [];
+  let calls = 0;
+  const poll = contracts.singleFlight(() => new Promise(resolve => {
+    calls += 1;
+    releases.push(resolve);
+  }));
+
+  const first = poll();
+  const second = poll();
+  const third = poll();
+  assert.equal(first, second);
+  assert.equal(second, third);
+  assert.equal(calls, 1);
+
+  releases.shift()();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2);
+  releases.shift()();
+  await first;
+  assert.equal(calls, 2);
+});
+
 test("API errors retain their message and machine-readable classification", () => {
   assert.equal(contracts.errorText({
     message: "Selected model is at capacity. Please try a different model.",

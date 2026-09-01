@@ -200,7 +200,7 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn('m.reasoning_effort||""', meta)
 
     def test_unchanged_status_polls_do_not_rebuild_or_reorder_the_sidebar(self):
-        threads = self.html.split("async function loadThreads", 1)[1].split(
+        threads = self.html.split("const loadThreads=", 1)[1].split(
             "const isActive", 1)[0]
         self.assertIn("UIContracts.stableById(threads,nextThreads)", threads)
         render = self.html.split("function renderList", 1)[1].split(
@@ -346,13 +346,32 @@ class UiStaticTests(unittest.TestCase):
         self.assertNotIn("txUpdateLast", self.html)
 
     def test_polling_failures_preserve_last_good_ui_state(self):
-        threads = self.html.split("async function loadThreads", 1)[1].split(
+        threads = self.html.split("const loadThreads=", 1)[1].split(
             "const isActive", 1)[0]
         self.assertIn("if(!Array.isArray(nextThreads)) return", threads)
         usage = self.html.split("async function loadUsage", 1)[1].split(
             "/* ---------- effective settings", 1)[0]
         self.assertIn("if(r.error||!r.result){", usage)
         self.assertIn('$("#usage").append(note)', usage)
+
+    def test_idle_reconciliation_uses_revision_probe_not_full_replay(self):
+        reconcile = self.html.split("async function reconcile", 1)[1].split(
+            "/* ---------- events", 1)[0]
+        self.assertIn('"&revision="+encodeURIComponent(transcriptRevision)',
+                      reconcile)
+        self.assertIn("if(t.unchanged) return", reconcile)
+
+    def test_background_and_overlapping_polls_are_bounded(self):
+        threads = self.html.split("const loadThreads=", 1)[1].split(
+            "const isActive", 1)[0]
+        agents = self.html.split("const loadAgents=", 1)[1].split(
+            "function label", 1)[0]
+        self.assertIn("UIContracts.singleFlight(async()=>", threads)
+        self.assertIn("UIContracts.singleFlight(async()=>", agents)
+        boot = self.html.split("/* ---------- boot ---------- */", 1)[1]
+        self.assertIn('if(!document.hidden) loadThreads()', boot)
+        self.assertIn('if(!document.hidden&&(cur||tab==="agents")) loadAgents()',
+                      boot)
 
     def test_mcp_elicitation_links_reject_non_http_schemes(self):
         elicitation = self.html.split('kind==="elicitation"', 1)[1].split(

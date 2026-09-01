@@ -443,6 +443,16 @@ const UIContracts=Object.freeze({
     pane.scrollTop=follow?pane.scrollHeight:previousTop;
     return result;
   },
+  singleFlight(task){
+    let running=null, rerun=false;
+    return function(){
+      if(running){ rerun=true; return running; }
+      running=(async()=>{
+        do{ rerun=false; await task(); }while(rerun);
+      })().finally(()=>{ running=null; });
+      return running;
+    };
+  },
   errorText(error){
     if(error===undefined||error===null) return "Unknown API error";
     if(typeof error==="string") return error;
@@ -1099,15 +1109,12 @@ function projOf(id){
   if(pin&&pin.name) return pin.name;
   return "(unassigned)";
 }
-let threadsGeneration=0;
-async function loadThreads(){
-  const generation=++threadsGeneration;
+const loadThreads=UIContracts.singleFlight(async()=>{
   const r=await rpc("thread/list",{limit:100});
   const nextThreads=r.result&&r.result.data;
   if(!Array.isArray(nextThreads)) return; // preserve the last good sidebar on a polling error
   await loadProjects();
   await Promise.all(nextThreads.slice(0,60).map(t=>cwdOf(t.id).catch(()=>"")));
-  if(generation!==threadsGeneration) return;
   // thread/list is recency-ordered, so an active thread otherwise jumps around
   // the sidebar on every turn. Keep existing rows stable and prepend only
   // genuinely new threads.
@@ -1118,7 +1125,7 @@ async function loadThreads(){
   const projs=new Set(threads.map(t=>projOf(t.id))); projs.delete("(unassigned)");
   $("#nP").textContent=projs.size?` ${projs.size}`:"";
   renderList();
-}
+});
 const isActive=t=>((t.status||{}).type)==="active";
 /* Sub-agent threads carry no name -- the useful identity is the nickname plus
    which agent definition ran (source.subagent.thread_spawn.agent_path). */
@@ -1142,7 +1149,7 @@ let agents=[];        // sub-agent threads spawned by the open thread
 /* Codex sub-agents are SEPARATE THREADS linked by spawn edges, not inline tool
    calls. They are excluded from a default thread/list because sourceKinds
    defaults to interactive-only, so ask for them explicitly. */
-async function loadAgents(){
+const loadAgents=UIContracts.singleFlight(async()=>{
   const parent=cur;
   // Sub-agent threads are ONLY reachable via ancestorThreadId -- a plain
   // thread/list never returns them, whatever sourceKinds you pass. So with no
@@ -1166,7 +1173,7 @@ async function loadAgents(){
   agents=UIContracts.stableById(agents,rows);
   $("#nA").textContent=agents.length?` ${agents.length}`:"";
   if(tab==="agents") renderList();
-}
+});
 function label(t){ return t.name||nameCache[t.id]||t.preview||t.id.slice(0,8); }
 let renderedListFingerprint="";
 function listFingerprint(){
@@ -2193,7 +2200,10 @@ async function reconcile(){
   if(busy) return;
   reconciling=true;
   try{
-    const t=await (await fetch("/transcript?id="+encodeURIComponent(cur))).json();
+    let url="/transcript?id="+encodeURIComponent(cur);
+    if(transcriptRevision) url+="&revision="+encodeURIComponent(transcriptRevision);
+    const t=await (await fetch(url)).json();
+    if(t.unchanged) return;
     const rows=t.rows||[], n=rows.length;
     const revision=t.revision||"";
     if((revision&&revision!==transcriptRevision)||(!revision&&n!==renderedFromRollout)){
@@ -2399,8 +2409,8 @@ es.onmessage=async ev=>{
   loadAgents();
   loadUsage();
   setInterval(()=>{ if(!document.hidden) loadUsage(); },120000);
-  setInterval(()=>{ loadThreads(); },1000);
-  setInterval(()=>{ loadAgents(); },5000);   // sub-agent counts + Agents tab
+  setInterval(()=>{ if(!document.hidden) loadThreads(); },2000);
+  setInterval(()=>{ if(!document.hidden&&(cur||tab==="agents")) loadAgents(); },10000);
   setInterval(()=>{ reconcile(); },6000);  // backfill anything never displayed
                                                    // even while backgrounded
   document.addEventListener("visibilitychange",()=>{ if(!document.hidden){

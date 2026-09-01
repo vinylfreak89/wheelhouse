@@ -298,6 +298,29 @@ class HandlerContractTests(unittest.TestCase):
         self.assertTrue(data["revision"])
         self.assertIn("1 timestamp inversion", data["journalWarning"])
 
+    def test_transcript_revision_probe_does_not_reopen_unchanged_rollout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".codex" / "sessions"
+            root.mkdir(parents=True)
+            rollout = root / "rollout-thread-a.jsonl"
+            rollout.write_text(json.dumps({
+                "timestamp": "2026-09-02T00:00:00Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}]},
+            }) + "\n", encoding="utf-8")
+            stat = rollout.stat()
+            revision = f"{stat.st_mtime_ns}:{stat.st_size}"
+            request, sent = handler(
+                f"/transcript?id=thread-a&revision={revision}")
+            with mock.patch.dict(os.environ, {"HOME": temp}), \
+                 mock.patch("builtins.open",
+                            side_effect=AssertionError("rollout was reparsed")):
+                request.do_GET()
+            data = json.loads(sent[0][1])
+
+        self.assertEqual(data, {"unchanged": True, "revision": revision})
+
     def test_threadmeta_tolerates_a_reduced_state_database_schema(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
