@@ -47,7 +47,7 @@ Every subcommand runs the same preflight: GUI up, bridge ready, then act.
   codex-run rm <id>                  delete permanently, INCLUDING its sub-agents
                                      (destroys their rollouts)
 """
-import json, os, subprocess, sys, time, urllib.error, urllib.request
+import glob, hashlib, json, os, subprocess, sys, time, urllib.error, urllib.request
 
 PORT = int(os.environ.get("CODEX_BRIDGE_PORT", "8770"))
 B = f"http://127.0.0.1:{PORT}"
@@ -381,23 +381,85 @@ DEFAULT_APPROVALS = os.environ.get("CODEX_APPROVALS", "auto-review")
 
 
 # ------------------------------------------------------------------ tree lock
-# Two agents write this checkout: this CLI and whatever Codex does inside a turn.
+# Two agents write a checkout: this CLI and whatever Codex does inside a turn.
 # Without exclusion they interleave -- one `git add` sweeps up the other's
 # half-finished edits (observed: an approvals fix landed inside a commit about
 # turn parameters), and reloading the UI mid-write serves broken JS.
 #
+# SCOPED PER WORKING ROOT (2026-09-01). Until then there was ONE global
+# tree.lock, so a turn in one checkout contended with an unrelated one. That
+# false sharing is also why contention had to warn-and-proceed: making it
+# "refuse loudly", as the epoch-overlay design wants, would have serialized
+# every project on the account. Scope had to come first. The REGISTRY stays
+# global -- one directory, so `lock status --all` can show every hold -- but the
+# EXCLUSION is per root.
+#
+# The root is the git toplevel when the path is inside a work tree, else the
+# realpath itself: a repo is the unit that actually collides, because `git add`
+# and `.git/index.lock` are repo-wide rather than directory-wide.
+#
 # ADVISORY, not enforced by the filesystem: it works because both sides check.
 # A lock whose owner process is gone is stale and may be broken; a lock held by
 # a LIVE process must be waited on, never stolen silently.
-LOCKFILE = os.path.join(os.path.dirname(REGISTRY), "tree.lock")
+LOCKDIR = os.path.join(os.path.dirname(REGISTRY), "tree-locks")
+
+# The pre-scoping global lock. Still HONORED while the file exists, because a
+# live Codex turn may hold it by hand -- CODEX-TURN.md handed that turn this
+# exact path, and its release writes this path, so it cannot be moved out from
+# under it. LEGACY_ROOT records which root it covers; without that mapping the
+# hold is honored for every root, i.e. the old behavior, which is the safe
+# direction to fail. Both files disappear for good once that hold is released.
+LEGACY_LOCKFILE = os.path.join(os.path.dirname(REGISTRY), "tree.lock")
+LEGACY_ROOT = os.path.join(LOCKDIR, ".legacy-root")
 
 
-def _lock_read():
+def working_root(path=None):
+    """The unit of exclusion for `path`: its git toplevel, else its realpath."""
+    p = os.path.realpath(os.path.expanduser(path or os.getcwd()))
+    if not os.path.isdir(p):
+        p = os.path.dirname(p) or p
     try:
-        with open(LOCKFILE, encoding="utf-8") as f:
-            return json.load(f)
+        out = subprocess.run(["git", "-C", p, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return os.path.realpath(out.stdout.strip())
     except Exception:
+        pass
+    return p
+
+
+def lock_path(root):
+    """One file per root, in a global directory. Named for a human reading
+    `ls`, disambiguated by a hash because basenames collide across checkouts."""
+    h = hashlib.sha256(root.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(LOCKDIR, f"{os.path.basename(root) or 'root'}-{h}.lock")
+
+
+def _legacy_covers(root):
+    """The legacy global lockfile, but only when it can cover `root`."""
+    if not os.path.exists(LEGACY_LOCKFILE):
         return None
+    try:
+        with open(LEGACY_ROOT, encoding="utf-8") as f:
+            mapped = f.read().strip()
+    except Exception:
+        return LEGACY_LOCKFILE          # scope unknown -> honor it everywhere
+    return LEGACY_LOCKFILE if mapped == root else None
+
+
+def _lock_read(root):
+    for path in (lock_path(root), _legacy_covers(root)):
+        if not path:
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        d.setdefault("root", root)
+        d["_path"] = path
+        return d
+    return None
 
 
 def _alive(pid):
@@ -408,24 +470,68 @@ def _alive(pid):
         return False
 
 
+def _pid_is_shared_server(pid):
+    """True when `pid` is the app-server, whose liveness proves NOTHING about a
+    hold: it is shared by every turn and outlives all of them. Codex, writing a
+    hold by hand, has no other live pid it can name, so those holds must fall
+    back to thread liveness or they can never be reclaimed."""
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True, timeout=10)
+        return "app-server" in out.stdout
+    except Exception:
+        return False
+
+
+_THREAD_ACTIVE_CACHE = {}
+
+
+def _thread_active(prefix):
+    """True / False / None -- None means UNDETERMINED (bridge unreachable), and
+    callers must treat that as live, never as dead. Cached per process because
+    lock_status is called in acquire loops."""
+    if prefix in _THREAD_ACTIVE_CACHE:
+        return _THREAD_ACTIVE_CACHE[prefix]
+    try:
+        rows = rpc("thread/list", {"limit": 60}, 40).get("data", [])
+    except Exception:
+        return None                      # deliberately not cached
+    hit = any(t.get("id", "").startswith(prefix)
+              and (t.get("status") or {}).get("type") == "active" for t in rows)
+    _THREAD_ACTIVE_CACHE[prefix] = hit
+    return hit
+
+
 #: a manual hold with no live process is abandoned after this long
 LOCK_MAX_AGE = int(os.environ.get("LOCK_MAX_AGE", "3600"))
 
 
-def lock_status():
-    """Staleness has TWO forms, because holders differ.
+def lock_status(root=None):
+    """Staleness has THREE forms, because holders differ.
 
     A `task` turn holds the lock inside a long-lived process, so a dead pid
     means abandoned. A manual `lock acquire` returns to the shell immediately --
     its pid is gone by the next command, which is normal, not stale. Those holds
     record pid null and expire on AGE instead.
+
+    The third: a hold Codex wrote by hand names the APP-SERVER pid, the only
+    live pid it can see. That pid outlives every turn, so the first rule can
+    never fire and the root would stay locked forever. For those, liveness is
+    the owning THREAD's, not the pid's. An undetermined answer counts as live --
+    a lock is never stolen on a failed lookup.
     """
-    d = _lock_read()
+    root = root or working_root()
+    d = _lock_read(root)
     if not d:
         return None
     pid = d.get("pid")
     if pid is not None and not _alive(pid):
         d["stale"] = True                       # process-held and the process died
+    elif pid is not None and _pid_is_shared_server(pid):
+        owner = d.get("owner") or ""
+        if owner.startswith("codex:"):
+            if _thread_active(owner.split(":", 1)[1]) is False:
+                d["stale"] = True               # owning turn is over
     elif pid is None:
         try:
             age = time.time() - time.mktime(time.strptime(d.get("since", ""),
@@ -438,28 +544,82 @@ def lock_status():
     return d
 
 
-def lock_acquire(owner, note="", wait=0, pid=True):
+def lock_acquire(owner, root=None, note="", wait=0, pid=True):
+    root = root or working_root()
+    target = lock_path(root)
     waited = 0
     while True:
-        cur = lock_status()
+        cur = lock_status(root)
         if cur is None or cur.get("stale"):
             if cur:
                 print(f"breaking stale lock from pid {cur.get('pid')} "
                       f"({cur.get('owner')})", file=sys.stderr)
-            os.makedirs(os.path.dirname(LOCKFILE), exist_ok=True)
-            tmp = LOCKFILE + ".tmp"
+                # A stale hold may be the legacy global file, which lives
+                # elsewhere; clear whatever file actually carried it.
+                if cur.get("_path") and cur["_path"] != target:
+                    try: os.remove(cur["_path"])
+                    except OSError: pass
+            os.makedirs(LOCKDIR, exist_ok=True)
+            tmp = target + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"owner": owner, "pid": os.getpid() if pid else None,
-                           "note": note,
+                           "note": note, "root": root,
                            "since": time.strftime("%Y-%m-%dT%H:%M:%S")}, f)
-            os.replace(tmp, LOCKFILE)
+            os.replace(tmp, target)
             return True
         if waited >= wait:
             return False
         time.sleep(2); waited += 2
 
 
-def lock_release(owner=None, force=False):
+def lock_all():
+    """Every live-or-stale hold, for `lock status --all`. The registry is
+    global precisely so this view exists."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(LOCKDIR, "*.lock"))) + [LEGACY_LOCKFILE]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        d["_path"] = path
+        if path == LEGACY_LOCKFILE and "root" not in d:
+            try:
+                with open(LEGACY_ROOT, encoding="utf-8") as f:
+                    d["root"] = f.read().strip()
+            except Exception:
+                d["root"] = "(unscoped legacy hold — covers every root)"
+        st = lock_status(d.get("root")) or {}
+        d["stale"] = st.get("stale", False) if st.get("_path") == path else False
+        out.append(d)
+    return out
+
+
+def lock_sweep():
+    """Reap every hold, at any root, whose owner is provably gone.
+
+    Not a migration step: the defect it clears is permanent. Any hold Codex
+    writes by hand (CODEX-TURN.md tells it to, for queued turns) can only name
+    the app-server pid, because that is the sole live pid it can see -- and that
+    pid outlives every turn, so `dead pid ⇒ stale` never fires for such a hold.
+    Without a thread-aware reaper those strand their root as permanently held by
+    an apparently-live process. Staleness itself is decided in lock_status; this
+    just applies it across the whole registry.
+    """
+    reaped = []
+    for d in lock_all():
+        if d.get("stale"):
+            try: os.remove(d["_path"])
+            except FileNotFoundError: pass
+            reaped.append(d)
+    if not os.path.exists(LEGACY_LOCKFILE):
+        # the scope mapping is meaningless once the file it scoped is gone
+        try: os.remove(LEGACY_ROOT)
+        except FileNotFoundError: pass
+    return reaped
+
+
+def lock_release(owner=None, root=None, force=False):
     """Release refuses to break another holder's LIVE lock.
 
     The old behavior deleted the file unconditionally when no owner was given,
@@ -469,18 +629,20 @@ def lock_release(owner=None, force=False):
     no owner given, only a stale hold (dead pid, or aged-out manual hold) or
     one's own may be removed; a live foreign hold requires force=True and a
     deliberate decision."""
-    d = _lock_read()
+    root = root or working_root()
+    d = _lock_read(root)
     if not d:
         return False
     pid = d.get("pid")
     live = pid is not None and _alive(pid)
     if not live and pid is None:
         # manual hold: live until it ages out
-        st = lock_status() or {}
+        st = lock_status(root) or {}
         live = not st.get("stale")
     mine = owner is not None and d.get("owner") == owner
     if force or mine or not live:
-        try: os.remove(LOCKFILE)
+        # `_path` may be the legacy global file rather than this root's file.
+        try: os.remove(d.get("_path") or lock_path(root))
         except FileNotFoundError: pass
         return True
     print(f"REFUSING to release live lock held by {d.get('owner')}"
@@ -658,7 +820,11 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     """
     with open(os.path.expanduser(path), encoding="utf-8") as prompt:
         text = prompt.read()
-    inp = _turn_input(text)
+    # The lock is scoped to the root this turn actually writes: the explicit
+    # --cwd when given, else the thread's own cwd.
+    st = thread_settings(tid)
+    turn_root = working_root(cwd or st.get("cwd") or None)
+    inp = _turn_input(text, turn_root)
     if skill:
         inp.append({"type": "skill", "name": skill,
                     "path": skill_path or _skill_path(skill)})
@@ -677,24 +843,25 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
         p["cwd"] = os.path.abspath(os.path.expanduser(cwd))
     # A Codex turn WRITES. Hold the tree lock for its duration so nothing else
     # edits this checkout underneath it (and vice versa).
-    st = thread_settings(tid)
     print("turn: model=%s effort=%s approvals=%s%s" % (
         st.get("model") or "?",
         effort or (st.get("reasoning_effort") or "thread default"),
         st.get("approval_mode") or "?",
         "  (effort overridden)" if effort else ""), file=sys.stderr)
-    held = lock_acquire(f"codex:{tid[:8]}", note="turn in progress",
+    held = lock_acquire(f"codex:{tid[:8]}", root=turn_root,
+                        note="turn in progress",
                         wait=int(os.environ.get("LOCK_WAIT", "0")))
     if not held:
-        cur = lock_status() or {}
-        print(f"WARNING: tree lock held by {cur.get('owner')} (pid {cur.get('pid')})"
-              " -- dispatching anyway, edits may interleave", file=sys.stderr)
+        cur = lock_status(turn_root) or {}
+        print(f"WARNING: tree lock for {turn_root} held by {cur.get('owner')}"
+              f" (pid {cur.get('pid')}) -- dispatching anyway, edits may interleave",
+              file=sys.stderr)
     try:
         before = len(transcript(tid))
         rpc("turn/start", p, 1800)
         idle = wait_idle(tid, limit=int(os.environ.get("SEND_WAIT", "3600")))
     finally:
-        if held: lock_release(f"codex:{tid[:8]}")
+        if held: lock_release(f"codex:{tid[:8]}", root=turn_root)
     if not idle:
         print(f"WARNING: turn STILL RUNNING after the wait cap -- output below is"
               f" PARTIAL, and the tree lock has been released while Codex may still"
@@ -759,7 +926,7 @@ def errors_of(tid):
     return out
 
 
-def turn_protocol():
+def turn_protocol(root=None):
     """Codex-facing shared-checkout protocol, injected into every dispatched
     turn. Codex cannot read SKILL.md (deliberately not a Codex skill root), so
     the working agreement — lock, commit conventions, AGENTS.md symlink — must
@@ -771,15 +938,15 @@ def turn_protocol():
     p = os.path.join(ROOT, ".claude", "skills", "codex-run", "CODEX-TURN.md")
     try:
         with open(p, encoding="utf-8") as f:
-            txt = f.read().replace("{LOCKFILE}", LOCKFILE)
+            txt = f.read().replace("{LOCKFILE}", lock_path(root or working_root()))
     except Exception:
         return None
     return txt
 
 
-def _turn_input(text):
+def _turn_input(text, root=None):
     inp = []
-    proto = turn_protocol()
+    proto = turn_protocol(root)
     if proto:
         inp.append({"type": "text", "text": proto})
     inp.append({"type": "text", "text": text})
@@ -788,24 +955,27 @@ def _turn_input(text):
 
 def send(tid, text, model=None, effort=None):
     # Same rule as send_file: inherit the thread's settings unless overridden.
-    p = {"threadId": tid, "input": _turn_input(text)}
+    turn_root = working_root(thread_settings(tid).get("cwd") or None)
+    p = {"threadId": tid, "input": _turn_input(text, turn_root)}
     if model: p["model"] = model
     if effort: p["effort"] = effort
     # A send turn WRITES just like a task turn does; hold the tree lock for its
     # duration (send previously skipped this, so send-dispatched turns ran with
     # no lock held by anyone unless Codex thought to take it itself).
-    held = lock_acquire(f"codex:{tid[:8]}", note="turn in progress (send)",
+    held = lock_acquire(f"codex:{tid[:8]}", root=turn_root,
+                        note="turn in progress (send)",
                         wait=int(os.environ.get("LOCK_WAIT", "0")))
     if not held:
-        cur = lock_status() or {}
-        print(f"WARNING: tree lock held by {cur.get('owner')} (pid {cur.get('pid')})"
-              " -- dispatching anyway, edits may interleave", file=sys.stderr)
+        cur = lock_status(turn_root) or {}
+        print(f"WARNING: tree lock for {turn_root} held by {cur.get('owner')}"
+              f" (pid {cur.get('pid')}) -- dispatching anyway, edits may interleave",
+              file=sys.stderr)
     try:
         before = len(transcript(tid))
         rpc("turn/start", p, 900)
         idle = wait_idle(tid, limit=int(os.environ.get("SEND_WAIT", "3600")))
     finally:
-        if held: lock_release(f"codex:{tid[:8]}")
+        if held: lock_release(f"codex:{tid[:8]}", root=turn_root)
     if not idle:
         print(f"WARNING: turn STILL RUNNING after the wait cap -- output below is"
               f" PARTIAL, and the tree lock has been released while Codex may still"
@@ -842,32 +1012,54 @@ def main():
         print(f"renamed -> {got}")
     elif c == "lock":
         sub = a[1] if len(a) > 1 else "status"
-        if sub == "status":
-            d = lock_status()
-            print("unlocked" if not d else
-                  f"held by {d.get('owner')} "
-                  + (f"pid {d.get('pid')} " if d.get("pid") else "")
-                  + f"since {d.get('since')}"
-                  + (f" ({d['age_s']}s)" if d.get("age_s") is not None else "")
-                  + ("  [STALE - owner gone]" if d.get("stale") else "")
-                  + (("  " + d["note"]) if d.get("note") else ""))
+        # --root scopes any lock subcommand to another checkout; the default is
+        # the root containing the cwd, never a global lock.
+        rest = list(a[2:])
+        root = None
+        if "--root" in rest:
+            i = rest.index("--root")
+            root = working_root(rest[i + 1]); del rest[i:i + 2]
+        root = root or working_root()
+
+        def _fmt(d):
+            return (f"held by {d.get('owner')} "
+                    + (f"pid {d.get('pid')} " if d.get("pid") else "")
+                    + f"since {d.get('since')}"
+                    + (f" ({d['age_s']}s)" if d.get("age_s") is not None else "")
+                    + ("  [STALE - owner gone]" if d.get("stale") else "")
+                    + (("  " + d["note"]) if d.get("note") else ""))
+
+        if sub == "status" and "--all" in rest:
+            rows = lock_all()
+            if not rows:
+                print("no locks held")
+            for d in rows:
+                print(f"{d.get('root')}\n    {_fmt(d)}")
+        elif sub == "status":
+            d = lock_status(root)
+            print(f"{root}: " + ("unlocked" if not d else _fmt(d)))
         elif sub == "acquire":
-            who = a[2] if len(a) > 2 else "manual"
+            who = rest[0] if rest else "manual"
             # manual holds outlive this process, so record no pid
-            ok = lock_acquire(who, note=" ".join(a[3:]), pid=False,
+            ok = lock_acquire(who, root=root, note=" ".join(rest[1:]), pid=False,
                               wait=int(os.environ.get("LOCK_WAIT", "0")))
-            print("acquired" if ok else "BUSY")
+            print(f"{'acquired' if ok else 'BUSY'}: {root}")
             if not ok: sys.exit(1)
         elif sub == "release":
-            owner = None
-            force = "--force" in a
-            rest = [x for x in a[2:] if x != "--force"]
-            if rest: owner = rest[0]
-            ok = lock_release(owner, force=force)
+            force = "--force" in rest
+            rest = [x for x in rest if x != "--force"]
+            ok = lock_release(rest[0] if rest else None, root=root, force=force)
             print("released" if ok else "not released")
             if not ok: sys.exit(1)
+        elif sub == "sweep":
+            gone = lock_sweep()
+            print("no stale holds" if not gone else
+                  "\n".join(f"reaped {d.get('root')}  ({d.get('owner')})"
+                            for d in gone))
         else:
-            sys.exit("lock status|acquire [owner] [note]|release [owner] [--force]")
+            sys.exit("lock status [--all] [--root DIR] | acquire [owner] [note] "
+                     "[--root DIR] | release [owner] [--force] [--root DIR] | "
+                     "sweep")
     elif c == "project":
         root = claude_project(project_cwd())
         if not root:

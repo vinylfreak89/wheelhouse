@@ -140,7 +140,7 @@ setup.
     codex-run say "do the thing"        # most common — auto-named from this chat
     codex-run up                        # just ensure GUI + bridge are live
     codex-run name                      # show the name that would be used
-    codex-run new ["<name>"] [cwd]      # create a thread, print its id
+    codex-run new [cwd]                 # create a thread, print its id
     codex-run send <id> "<text>"        # send a turn, wait, print the reply
     codex-run steer <id> "<text>"       # type into a RUNNING turn
     codex-run list / info <id> / read <id>
@@ -156,23 +156,36 @@ cwd), `project` and `rename` (thread resolution).
 override.
 
 **Names are automatic and should stay that way.** `codex-run` names a thread
-after **this chat** — e.g. `API migration review`. No `[project]` prefix. Pass
-an explicit name only when one thread per chat is not enough.
+after **this chat** — e.g. `API migration review`. No `[project]` prefix.
+`new` takes no name at all: it is always the chat title, deliberately not
+overridable. Only `say` accepts an explicit name
+(`codex-run say "<name>" "<text>"`), for when one thread per chat is not enough.
 
 Requires `codex` on PATH (brew cask), `python3`, and `~/.codex/auth.json`.
 Never start a second `codex app-server` by hand.
 
 ## Take the tree lock before writing a shared checkout
 
-    codex-run lock status                    # who holds it, and since when
+    codex-run lock status                    # this root: who holds it, since when
+    codex-run lock status --all              # every held root
     codex-run lock acquire claude "why"      # take it before you edit
     codex-run lock release
+    codex-run lock ... --root DIR            # act on another checkout's lock
+
+**Locks are scoped per working root** (the git toplevel containing the path, or
+the path itself outside a repo). Until 2026-09-01 there was one global lock, so
+a turn in one checkout blocked an unrelated one; the registry is still a single
+directory (`state/tree-locks/`, hence `--all`) but the exclusion is per root.
+That scoping is a precondition for ever making contention refuse loudly rather
+than warn-and-proceed: globally, refusing would serialize every project on the
+account.
 
 `codex-run task` AND `codex-run send` take the lock for the DURATION of the
 turn automatically and release it in a `finally` (`send` historically did not —
-send-dispatched turns ran with nobody holding the lock). If the lock is already
-held they warn and proceed rather than blocking — set `LOCK_WAIT=300` to wait
-instead. Queued turns run with no live dispatcher process, so no lock is held
+send-dispatched turns ran with nobody holding the lock). The root locked is the
+turn's own: its `--cwd` when given, else the thread's cwd. If the lock is
+already held they warn and proceed rather than blocking — set `LOCK_WAIT=300`
+to wait instead. Queued turns run with no live dispatcher process, so no lock is held
 for them; `CODEX-TURN.md` tells Codex to acquire it itself in that case.
 
 The shared mechanics — lockfile path and format, hard-stop-on-live-holds,

@@ -17,7 +17,10 @@ else.
   regular file** (atomic-write paths silently fork the instructions): edit the
   target, and verify the link is intact after any instruction change.
 - **Tree lock** (advisory; it works because both sides check): `{LOCKFILE}`,
-  JSON `{"owner","pid","note","since"}`, written atomically (tmp + rename).
+  JSON `{"owner","pid","note","root","since"}`, written atomically (tmp +
+  rename). That path is specific to THIS turn's working root: locks are scoped
+  per root, so an unrelated checkout neither blocks you nor is blocked by you.
+  Use the path above verbatim; never write the legacy `state/tree.lock`.
   The dispatching process normally holds it for your whole turn (owner
   `codex:<thread-prefix>` — that hold is YOURS; do not re-acquire). If no live
   hold covers your turn (e.g. a queued turn), acquire it before writing tracked
