@@ -750,6 +750,21 @@ def approval_overrides(mode):
     return {"approvalPolicy": mode, "approvalsReviewer": "user"}
 
 
+def _valid_cwd(arg):
+    """The optional cwd for `new`: an existing directory, else None.
+
+    `new` takes only a cwd -- the thread NAME is always the chat title (not
+    overridable). A stray name passed where a cwd is expected (the skill once
+    documented `new [name] [cwd]`) must resolve to None, NOT be forwarded to
+    thread/start as a bogus cwd that fails with a confusing "working directory
+    does not exist". Only an existing directory counts; a relative dir resolves
+    against the process cwd and ~ is expanded, but the raw arg is returned
+    unchanged so downstream resolution is exactly as before for a real dir."""
+    if arg and os.path.isdir(os.path.expanduser(arg)):
+        return arg
+    return None
+
+
 def new(name, cwd=None, model=None, effort=None, sandbox="workspace-write",
         approvals=DEFAULT_APPROVALS, reuse=True):
     if reuse:
@@ -1096,8 +1111,17 @@ def main():
                 e = bind_project(tid)              # pin lazily on first look
                 print(f"pinned: {e.get('name')}  <-  {e.get('root')}")
     elif c == "new":
-        # name is ALWAYS the chat title -- not overridable on purpose
-        cwd = a[1] if len(a) > 1 else None
+        # name is ALWAYS the chat title -- not overridable on purpose. The sole
+        # positional is a cwd; a stray NAME (the skill once documented
+        # `new [name] [cwd]`) must not be misread as a bogus cwd -- that failed
+        # with a confusing "working directory does not exist". Only an existing
+        # directory counts as cwd; anything else is a stray arg -> ignore + note.
+        raw = a[1] if len(a) > 1 else None
+        cwd = _valid_cwd(raw)
+        if raw and cwd is None:
+            print(f"note: ignoring {raw!r} -- `new` takes only an optional "
+                  f"existing directory as cwd; the thread name is always the "
+                  f"chat title (see `codex-run name`).", file=sys.stderr)
         nm = default_name(cwd)
         existed = find_thread(nm, cwd)
         tid = new(nm, cwd)

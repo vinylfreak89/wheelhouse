@@ -471,5 +471,30 @@ class ThreadResumeTests(unittest.TestCase):
         self._assert_resume_precedes_turn(calls, "thread-idle")
 
 
+class NewCwdArgTests(unittest.TestCase):
+    """`new` takes only an optional cwd -- the name is always the chat title.
+
+    A stray NAME passed in the cwd slot (the skill once documented
+    `new [name] [cwd]`) must resolve to None rather than be forwarded as a bogus
+    cwd that fails 'working directory does not exist'. Only an existing directory
+    is accepted, returned unchanged so downstream resolution is as before.
+    """
+
+    def test_existing_directory_is_used_as_cwd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(codex_run._valid_cwd(temp), temp)
+
+    def test_tilde_home_is_accepted_and_returned_unexpanded(self):
+        self.assertEqual(codex_run._valid_cwd("~"), "~")
+
+    def test_stray_name_does_not_become_a_cwd(self):
+        self.assertIsNone(
+            codex_run._valid_cwd("iCloud known-folder FXDetached trace"))
+
+    def test_missing_or_empty_arg_is_none(self):
+        self.assertIsNone(codex_run._valid_cwd(None))
+        self.assertIsNone(codex_run._valid_cwd(""))
+
+
 if __name__ == "__main__":
     unittest.main()
