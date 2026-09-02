@@ -419,5 +419,57 @@ class TurnSettingInheritanceTests(unittest.TestCase):
             self.assertEqual(turn["cwd"], os.path.abspath(temp))
 
 
+class ThreadResumeTests(unittest.TestCase):
+    """send/task must RESUME an idle thread before starting a turn.
+
+    The app-server unloads idle threads from memory; `turn/start` then fails
+    'thread not found' (-32600) while read/list/info still resolve the thread.
+    `steer` already issues a `thread/read` (the load/resume call) first; send and
+    send_file did not, so a send to an idle thread died. Both must resume first.
+    """
+
+    def _record(self):
+        calls = []
+
+        def rpc(method, params=None, timeout=30):
+            calls.append((method, params))
+            return {}
+
+        ctx = (
+            mock.patch.object(codex_run, "rpc", side_effect=rpc),
+            mock.patch.object(codex_run, "transcript", return_value=[]),
+            mock.patch.object(codex_run, "wait_idle"),
+            mock.patch.object(codex_run, "thread_settings", return_value={}),
+            mock.patch.object(codex_run, "lock_acquire", return_value=True),
+            mock.patch.object(codex_run, "lock_release"),
+        )
+        return calls, ctx
+
+    def _assert_resume_precedes_turn(self, calls, tid):
+        methods = [m for m, _ in calls]
+        self.assertIn("thread/read", methods, "no resume was issued")
+        self.assertIn("turn/start", methods)
+        self.assertLess(
+            methods.index("thread/read"), methods.index("turn/start"),
+            "thread/read (resume) must precede turn/start")
+        read = next(p for m, p in calls if m == "thread/read")
+        self.assertEqual(read.get("threadId"), tid)
+
+    def test_send_resumes_the_thread_before_turn_start(self):
+        calls, ctx = self._record()
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5]:
+            codex_run.send("thread-idle", "hello")
+        self._assert_resume_precedes_turn(calls, "thread-idle")
+
+    def test_send_file_resumes_the_thread_before_turn_start(self):
+        with tempfile.TemporaryDirectory() as temp:
+            prompt = Path(temp) / "prompt.txt"
+            prompt.write_text("hello", encoding="utf-8")
+            calls, ctx = self._record()
+            with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5]:
+                codex_run.send_file("thread-idle", str(prompt))
+        self._assert_resume_precedes_turn(calls, "thread-idle")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -812,6 +812,15 @@ def thread_settings(tid):
         return {}
 
 
+def _turn_start(p, timeout):
+    """Start a turn, first RESUMING the thread so an idle/unloaded thread does
+    not 404 with 'thread not found'. The app-server unloads idle threads from
+    memory; thread/read loads them back (the same resume `steer` relies on).
+    Without this, send/task fail on a thread that read/list/info all still see."""
+    rpc("thread/read", {"threadId": p["threadId"]}, 40)
+    rpc("turn/start", p, timeout)
+
+
 def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
     """Send a long prompt from a file, optionally attaching a skill item.
 
@@ -858,7 +867,7 @@ def send_file(tid, path, skill=None, skill_path=None, effort=None, cwd=None):
               file=sys.stderr)
     try:
         before = len(transcript(tid))
-        rpc("turn/start", p, 1800)
+        _turn_start(p, 1800)
         idle = wait_idle(tid, limit=int(os.environ.get("SEND_WAIT", "3600")))
     finally:
         if held: lock_release(f"codex:{tid[:8]}", root=turn_root)
@@ -972,7 +981,7 @@ def send(tid, text, model=None, effort=None):
               file=sys.stderr)
     try:
         before = len(transcript(tid))
-        rpc("turn/start", p, 900)
+        _turn_start(p, 900)
         idle = wait_idle(tid, limit=int(os.environ.get("SEND_WAIT", "3600")))
     finally:
         if held: lock_release(f"codex:{tid[:8]}", root=turn_root)
