@@ -307,6 +307,22 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("shiftHistory(\"earlier\")", self.html)
         self.assertIn("shiftHistory(\"later\")", self.html)
 
+    def test_thread_open_never_marshals_the_full_turn_graph_before_paging(self):
+        opened = self.html.split("async function open_(id)", 1)[1].split(
+            "let renderedFromRollout", 1)[0]
+        resume = 'rpc("thread/resume",{threadId:id,excludeTurns:true})'
+        tail = 'fetch("/transcript?id="+encodeURIComponent(id))'
+        self.assertIn(resume, opened)
+        self.assertIn(tail, opened)
+        self.assertLess(opened.index(resume), opened.index("const r=await resume"))
+        self.assertLess(opened.index(tail), opened.index("const r=await resume"),
+                        "tail I/O must overlap metadata-only resume")
+        self.assertNotIn('rpc("thread/resume",{threadId:id})', opened)
+
+        agent = self.html.split("async function openAgent", 1)[1].split(
+            '$("#aClose")', 1)[0]
+        self.assertIn(resume, agent)
+
     def test_hot_reload_restores_thread_before_accepting_its_live_events(self):
         self.assertNotIn("sessionStorage", self.html)
         self.assertNotIn("localStorage", self.html)

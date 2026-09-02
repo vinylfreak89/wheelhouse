@@ -1664,7 +1664,9 @@ async function openAgent(id,nickname){
   $("#alog").innerHTML="";
   $("#apane").classList.add("on");
   $("#aTitle").textContent=nickname||id.slice(0,8);
-  await rpc("thread/resume",{threadId:id});          // subscribes us to its events
+  await rpc("thread/resume",{threadId:id,excludeTurns:true});
+  // Resume subscribes us to live events; history comes from the explicit page
+  // below, so returning the full turn graph here is pure duplicate work.
   const tl=await rpc("thread/turns/list",
     {threadId:id,limit:60,sortDirection:"asc",itemsView:"full"},90);
   let turns=(tl.result&&tl.result.data)||[];
@@ -1867,7 +1869,13 @@ async function open_(id){
   cur=id; curTurn=null;
   rememberThreadId(id);
   renderedMetaFingerprint="";
-  const r=await rpc("thread/resume",{threadId:id});
+  // Metadata/live subscription and the cacheless journal tail are independent.
+  // Start both immediately. Most importantly, never ask app-server to marshal
+  // the complete turn graph only to discard it in favour of the journal page.
+  const resume=rpc("thread/resume",{threadId:id,excludeTurns:true});
+  const tail=fetch("/transcript?id="+encodeURIComponent(id)).then(response=>
+    response.json()).catch(()=>({rows:[]}));
+  const r=await resume;
   if(generation!==openGeneration||cur!==id) return false;
   if(r.error||!r.result){
     cur=null; curInfo={}; threadViewReady=true; rememberThreadId("");
@@ -1881,10 +1889,7 @@ async function open_(id){
   // ordered, timestamped, and complete, including tool calls and their output
   // (which thread/turns/list does not replay). No client-side cache: that
   // workaround was what duplicated, misordered and mis-stamped messages.
-  let page={rows:[]};
-  try{
-    page=await (await fetch("/transcript?id="+encodeURIComponent(id))).json();
-  }catch(e){}
+  const page=await tail;
   if(generation!==openGeneration||cur!==id) return;
 
   curInfo=th;
