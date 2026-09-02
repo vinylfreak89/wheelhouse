@@ -803,10 +803,28 @@ def wait_idle(tid, limit=3600):
 
 
 def transcript(tid, tail=None):
-    data = rpc("thread/turns/list", {"threadId": tid, "limit": 100,
-               "sortDirection": "asc", "itemsView": "full"}, 120).get("data", [])
+    """All turns, oldest first, paginated from the NEWEST end.
+
+    A single ascending page of 100 returned the OLDEST 100 turns, so on any thread
+    past 100 turns every newer turn was invisible: `read` showed a stale window and
+    `send` printed nothing (its before/after slice never grew) -- which led the
+    orchestrator to re-dispatch an already-completed task three times. Walk the
+    cursor from the newest turn back until exhausted (or until `tail` is covered).
+    """
+    turns, cursor = [], None
+    for _ in range(200):                      # hard cap: 20,000 turns
+        params = {"threadId": tid, "limit": 100, "sortDirection": "desc",
+                  "itemsView": "full"}
+        if cursor: params["cursor"] = cursor
+        r = rpc("thread/turns/list", params, 120)
+        page = r.get("data", [])
+        turns.extend(page)
+        cursor = r.get("nextCursor")
+        if not page or not cursor: break
+        if tail and sum(len(t.get("items", [])) for t in turns) >= tail: break
+    turns.reverse()
     out = []
-    for t in data:
+    for t in turns:
         for it in t.get("items", []):
             txt = it.get("text") or "".join(
                 c.get("text", "") for c in (it.get("content") or []))
