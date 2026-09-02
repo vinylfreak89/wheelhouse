@@ -321,6 +321,327 @@ class HandlerContractTests(unittest.TestCase):
 
         self.assertEqual(data, {"unchanged": True, "revision": revision})
 
+    def _turn(self, number, timestamp=None, rows=True):
+        timestamp = timestamp or f"2026-09-02T00:00:{number:02d}Z"
+        records = [{"timestamp": timestamp, "type": "event_msg",
+                    "payload": {"type": "task_started"}}]
+        if rows:
+            records.extend([
+                {"timestamp": timestamp, "type": "response_item",
+                 "payload": {"type": "message", "role": "user",
+                             "content": [{"text": f"question {number}"}]}},
+                {"timestamp": timestamp, "type": "response_item",
+                 "payload": {"type": "function_call", "name": "test",
+                             "call_id": f"call-{number}",
+                             "arguments": json.dumps({"turn": number})}},
+                {"timestamp": timestamp, "type": "response_item",
+                 "payload": {"type": "function_call_output",
+                             "call_id": f"call-{number}",
+                             "output": f"result {number}"}},
+                {"timestamp": timestamp, "type": "response_item",
+                 "payload": {"type": "message", "role": "assistant",
+                             "phase": "final_answer",
+                             "content": [{"text": f"answer {number}"}]}},
+            ])
+        records.append({"timestamp": timestamp, "type": "event_msg",
+                        "payload": {"type": "task_complete"}})
+        return records
+
+    def _journal(self, root, thread_id="thread-pages", turns=range(7)):
+        sessions = Path(root) / ".codex" / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        rollout = sessions / f"rollout-{thread_id}.jsonl"
+        records = [record for turn in turns for record in self._turn(turn)]
+        rollout.write_text("".join(json.dumps(record) + "\n" for record in records),
+                           encoding="utf-8")
+        return rollout, records
+
+    def test_transcript_pages_join_without_gaps_duplicates_or_reordering(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, records = self._journal(temp)
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                expected = bridge._render_records([
+                    item for item in bridge._iter_forward(
+                        sources, bridge._first_coord(sources))])[0]
+                pages = [bridge._page("thread-pages", sources, limit=5)]
+                while pages[0]["hasEarlier"]:
+                    pages.insert(0, bridge._page(
+                        "thread-pages", sources, direction="before",
+                        cursor=pages[0]["startCursor"], limit=5))
+
+        actual = [row for page in pages for row in page["rows"]]
+        self.assertEqual([row["id"] for row in actual],
+                         [row["id"] for row in expected])
+        self.assertEqual(len({row["id"] for row in actual}), len(actual))
+        commands = [row for row in actual if row["cls"] == "cmd"]
+        self.assertTrue(all("result" in row["text"] for row in commands))
+
+    def test_forward_pages_are_the_exact_inverse_of_backward_pages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self._journal(temp)
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                first = bridge._page("thread-pages", sources, direction="after",
+                                     cursor=bridge._encode_cursor(
+                                         "thread-pages", sources, 0, 0), limit=4)
+                pages = [first]
+                while pages[-1]["hasLater"]:
+                    pages.append(bridge._page(
+                        "thread-pages", sources, direction="after",
+                        cursor=pages[-1]["endCursor"], limit=4))
+                expected = bridge._render_records(list(bridge._iter_forward(
+                    sources, bridge._first_coord(sources))))[0]
+        self.assertEqual([row["id"] for page in pages for row in page["rows"]],
+                         [row["id"] for row in expected])
+
+    def test_page_limit_never_splits_a_large_turn_or_tool_pair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, _ = self._journal(temp, turns=[])
+            records = self._turn(1)
+            # One turn has far more rendered rows than the requested limit.
+            records[1:1] = [
+                {"timestamp": "2026-09-02T00:00:00Z", "type": "response_item",
+                 "payload": {"type": "message", "role": "assistant",
+                             "content": [{"text": f"part {i}"}]}}
+                for i in range(20)]
+            rollout.write_text("".join(json.dumps(r) + "\n" for r in records))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                page = bridge._page("thread-pages",
+                                    bridge._rollout_sources("thread-pages"), limit=2)
+        self.assertGreater(len(page["rows"]), 2)
+        command = next(row for row in page["rows"] if row["cls"] == "cmd")
+        self.assertIn("result 1", command["text"])
+
+    def test_append_keeps_existing_cursor_valid_and_exposes_only_new_turn(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, _ = self._journal(temp, turns=range(2))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                tail = bridge._page("thread-pages", sources, limit=100)
+                old_end = tail["endCursor"]
+                with rollout.open("a", encoding="utf-8") as fh:
+                    fh.write("".join(json.dumps(r) + "\n" for r in self._turn(2)))
+                sources = bridge._rollout_sources("thread-pages")
+                later = bridge._page("thread-pages", sources, direction="after",
+                                     cursor=old_end, limit=100)
+        self.assertEqual([row["text"] for row in later["rows"] if row["cls"] == "user"],
+                         ["question 2"])
+
+    def test_cursor_rejects_truncation_replacement_mutation_and_foreign_thread(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, _ = self._journal(temp, turns=range(3))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                tail = bridge._page("thread-pages", sources, limit=3)
+                cursor = tail["startCursor"]
+                with self.assertRaises(bridge.TranscriptCursorError):
+                    bridge._decode_cursor(cursor, "other-thread", sources)
+
+                original = rollout.read_bytes()
+                rollout.write_bytes(original[:20])
+                with self.assertRaises(bridge.TranscriptCursorError):
+                    bridge._decode_cursor(cursor, "thread-pages",
+                                          bridge._rollout_sources("thread-pages"))
+
+                rollout.write_bytes(original)
+                sources = bridge._rollout_sources("thread-pages")
+                cursor = bridge._page("thread-pages", sources, limit=3)["startCursor"]
+                file_index, offset = bridge._decode_cursor(cursor, "thread-pages", sources)
+                changed = bytearray(rollout.read_bytes())
+                changed[max(0, offset - 5)] ^= 1
+                rollout.write_bytes(changed)
+                with self.assertRaises(bridge.TranscriptCursorError):
+                    bridge._decode_cursor(cursor, "thread-pages",
+                                          bridge._rollout_sources("thread-pages"))
+
+                replacement = rollout.with_suffix(".new")
+                replacement.write_bytes(original)
+                os.replace(replacement, rollout)
+                with self.assertRaises(bridge.TranscriptCursorError):
+                    bridge._decode_cursor(cursor, "thread-pages",
+                                          bridge._rollout_sources("thread-pages"))
+
+    def test_tail_ignores_a_partially_appended_final_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, _ = self._journal(temp, turns=range(2))
+            with rollout.open("ab") as fh:
+                fh.write(json.dumps(self._turn(9)[1]).encode())  # valid JSON, no newline
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                page = bridge._page("thread-pages", sources, limit=100)
+                cursor = page["endCursor"]
+                with rollout.open("ab") as fh:
+                    fh.write(b"\n")
+                later = bridge._page("thread-pages",
+                                     bridge._rollout_sources("thread-pages"),
+                                     direction="after", cursor=cursor, limit=100)
+        self.assertNotIn("question 9", [row["text"] for row in page["rows"]])
+        self.assertIn("question 9", [row["text"] for row in later["rows"]])
+
+    def test_empty_turns_do_not_prevent_page_from_reaching_rendered_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, _ = self._journal(temp, turns=[])
+            records = self._turn(1) + self._turn(2, rows=False) + self._turn(3, rows=False)
+            rollout.write_text("".join(json.dumps(r) + "\n" for r in records))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                page = bridge._page("thread-pages",
+                                    bridge._rollout_sources("thread-pages"), limit=2)
+        self.assertIn("question 1", [row["text"] for row in page["rows"]])
+
+    def test_search_progress_is_monotonic_and_search_wraps_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self._journal(temp, turns=range(5))
+            request, _ = handler("/transcript/search")
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                forward = list(request._transcript_search_events(
+                    "thread-pages", "ANSWER", "forward"))
+                first = next(event for event in forward if event["type"] == "match")
+                again = list(request._transcript_search_events(
+                    "thread-pages", "answer", "forward", first["rowId"]))
+                second = next(event for event in again if event["type"] == "match")
+                backward_wrap = list(request._transcript_search_events(
+                    "thread-pages", "answer", "backward", first["rowId"]))
+                last = next(event for event in backward_wrap if event["type"] == "match")
+        progress = [event["percent"] for event in forward if event["type"] == "progress"]
+        self.assertEqual(progress, sorted(progress))
+        self.assertEqual(progress[-1], 100)
+        self.assertNotEqual(first["rowId"], second["rowId"])
+        self.assertNotEqual(first["rowId"], last["rowId"])
+        self.assertIn(first["rowId"], [row["id"] for row in first["page"]["rows"]])
+
+    def test_search_no_match_finishes_without_a_page(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self._journal(temp, turns=range(2))
+            request, _ = handler("/transcript/search")
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                events = list(request._transcript_search_events(
+                    "thread-pages", "not in this journal"))
+        self.assertEqual(events[-1], {"type": "done", "found": False})
+        self.assertEqual(events[-2]["percent"], 100)
+
+    def test_multiple_rollout_files_paginate_in_filename_then_byte_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sessions = Path(temp) / ".codex" / "sessions"
+            sessions.mkdir(parents=True)
+            for name, turns in (("a-thread-pages.jsonl", range(2)),
+                                ("b-thread-pages.jsonl", range(2, 4))):
+                records = [record for turn in turns for record in self._turn(turn)]
+                (sessions / name).write_text(
+                    "".join(json.dumps(record) + "\n" for record in records))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                tail = bridge._page("thread-pages", sources, limit=3)
+                older = bridge._page("thread-pages", sources, direction="before",
+                                     cursor=tail["startCursor"], limit=100)
+        texts = [row["text"] for row in older["rows"] + tail["rows"]
+                 if row["cls"] == "user"]
+        self.assertEqual(texts, ["question 0", "question 1", "question 2", "question 3"])
+
+    def test_reverse_reader_handles_records_larger_than_its_block(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "large.jsonl"
+            records = [{"n": 1, "payload": "x" * 140000}, {"n": 2}]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            source = {"path": str(path), "stat": path.stat()}
+            reverse = list(bridge._iter_reverse([source], (0, path.stat().st_size)))
+            forward = list(bridge._iter_forward([source], (0, 0)))
+        self.assertEqual([record[2]["n"] for record in reverse], [2, 1])
+        self.assertEqual(reverse[1][0], forward[0][0])
+        self.assertEqual(reverse[1][1], forward[0][1])
+
+    def test_transcript_endpoint_reports_stale_cursor_as_conflict(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rollout, _ = self._journal(temp, turns=range(2))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                cursor = bridge._page("thread-pages", sources, limit=3)["startCursor"]
+                rollout.write_bytes(rollout.read_bytes()[:10])
+                request, sent = handler(
+                    "/transcript?id=thread-pages&before=" + cursor)
+                request.do_GET()
+        self.assertEqual(sent[0][0], 409)
+        self.assertTrue(json.loads(sent[0][1])["cursorInvalid"])
+
+    def test_database_rollout_path_avoids_a_recursive_session_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            codex = home / ".codex"
+            codex.mkdir()
+            rollout = home / "exact.jsonl"
+            rollout.write_text("{}\n")
+            database = codex / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT)")
+                connection.execute("INSERT INTO threads VALUES (?, ?)",
+                                   ("thread-pages", str(rollout)))
+                connection.commit()
+            finally:
+                connection.close()
+            with mock.patch.dict(os.environ, {"HOME": temp}), \
+                 mock.patch.object(bridge.glob, "glob",
+                                   side_effect=AssertionError("recursive scan used")):
+                sources = bridge._rollout_sources("thread-pages")
+        self.assertEqual([source["path"] for source in sources], [str(rollout)])
+
+    def test_tail_page_does_not_parse_the_older_journal_prefix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self._journal(temp, turns=range(100))
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                sources = bridge._rollout_sources("thread-pages")
+                real_loads = json.loads
+                with mock.patch.object(bridge.json, "loads", wraps=real_loads) as loads:
+                    page = bridge._page("thread-pages", sources, limit=5)
+        self.assertTrue(page["hasEarlier"])
+        self.assertLess(loads.call_count, 25,
+                        "tail loading regressed to parsing the whole journal")
+
+    def test_search_http_stream_is_ndjson_and_finishes_without_content_length(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self._journal(temp, turns=range(2))
+            request = object.__new__(bridge.Handler)
+            request.path = ("/transcript/search?id=thread-pages&q=answer"
+                            "&direction=forward")
+            request.wfile = io.BytesIO()
+            response, headers = [], []
+            request.send_response = response.append
+            request.send_header = lambda key, value: headers.append((key, value))
+            request.end_headers = lambda: None
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                request._transcript_search()
+            events = [json.loads(line) for line in request.wfile.getvalue().splitlines()]
+        self.assertEqual(response, [200])
+        self.assertIn(("Content-Type", "application/x-ndjson; charset=utf-8"), headers)
+        self.assertNotIn("Content-Length", [key for key, _ in headers])
+        self.assertEqual(events[-1]["type"], "match")
+        self.assertTrue(request.close_connection)
+
+    def test_disconnected_search_client_cancels_scan_without_server_error(self):
+        class DisconnectingWriter:
+            def __init__(self):
+                self.writes = 0
+
+            def write(self, _payload):
+                self.writes += 1
+                if self.writes > 1:
+                    raise BrokenPipeError()
+
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp:
+            self._journal(temp, turns=range(5))
+            request = object.__new__(bridge.Handler)
+            request.path = "/transcript/search?id=thread-pages&q=answer"
+            request.wfile = DisconnectingWriter()
+            request.send_response = lambda _code: None
+            request.send_header = lambda _key, _value: None
+            request.end_headers = lambda: None
+            with mock.patch.dict(os.environ, {"HOME": temp}):
+                request._transcript_search()  # must not leak the disconnect
+        self.assertEqual(request.wfile.writes, 2)
+
     def test_threadmeta_tolerates_a_reduced_state_database_schema(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

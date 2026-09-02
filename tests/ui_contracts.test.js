@@ -294,6 +294,94 @@ test("repeated virtual shifts reach both ends without growing the DOM window", (
   assert.equal(range.end, total);
 });
 
+function page(generation, number, ids, edges={}) {
+  return {generation, number, rows: ids.map(id => ({id, text: id})),
+          startCursor: `s${number}`, endCursor: `e${number}`,
+          hasEarlier: Boolean(edges.earlier), hasLater: Boolean(edges.later)};
+}
+
+test("cacheless transcript pages retain provenance order and a hard memory bound", () => {
+  let pages = contracts.transcriptPages([], page("g1", 3, ["e", "f"]),
+                                        {direction: "reset", maxPages: 3});
+  pages = contracts.transcriptPages(pages, page("g1", 2, ["c", "d"]),
+                                    {direction: "earlier", maxPages: 3});
+  pages = contracts.transcriptPages(pages, page("g1", 1, ["a", "b"]),
+                                    {direction: "earlier", maxPages: 3});
+  assert.deepEqual(Array.from(contracts.transcriptRows(pages), row => row.id),
+                   ["a", "b", "c", "d", "e", "f"]);
+
+  pages = contracts.transcriptPages(pages, page("g1", 0, ["old"]),
+                                    {direction: "earlier", maxPages: 3});
+  assert.equal(pages.length, 3);
+  assert.deepEqual(Array.from(contracts.transcriptRows(pages), row => row.id),
+                   ["old", "a", "b", "c", "d"]);
+
+  pages = contracts.transcriptPages(pages, page("g1", 3, ["e", "f"]),
+                                    {direction: "later", maxPages: 3});
+  assert.equal(pages.length, 3);
+  assert.deepEqual(Array.from(contracts.transcriptRows(pages), row => row.id),
+                   ["a", "b", "c", "d", "e", "f"]);
+});
+
+test("retried page requests cannot duplicate stable journal rows", () => {
+  const first = page("g1", 1, ["a", "b", "c"]);
+  const overlap = page("g1", 2, ["c", "d", "e"]);
+  const pages = contracts.transcriptPages([first], overlap,
+                                          {direction: "later", maxPages: 3});
+  assert.deepEqual(Array.from(contracts.transcriptRows(pages), row => row.id),
+                   ["a", "b", "c", "d", "e"]);
+});
+
+test("empty rendered pages still advance cursors and exact retries are idempotent", () => {
+  const visible = page("g1", 2, ["c"]);
+  const empty = page("g1", 1, []);
+  let pages = contracts.transcriptPages([visible], empty,
+                                        {direction: "earlier", maxPages: 3});
+  assert.equal(pages.length, 2);
+  assert.equal(pages[0].startCursor, "s1");
+  const retried = contracts.transcriptPages(pages, empty,
+                                            {direction: "earlier", maxPages: 3});
+  assert.equal(retried.length, 2);
+  assert.equal(retried[0].startCursor, "s1");
+});
+
+test("a replaced journal generation atomically discards all old pages", () => {
+  const oldPages = [page("old", 1, ["a"]), page("old", 2, ["b"])];
+  const fresh = page("new", 1, ["replacement"]);
+  const pages = contracts.transcriptPages(oldPages, fresh,
+                                          {direction: "later", maxPages: 3});
+  assert.deepEqual(Array.from(contracts.transcriptRows(pages), row => row.id),
+                   ["replacement"]);
+});
+
+test("search progress is monotonic and clamped despite duplicate or stale events", () => {
+  let value = 0;
+  for (const update of [0, 17.5, 17.5, 9, 88, 110, 99])
+    value = contracts.monotonicProgress(value, update);
+  assert.equal(value, 100);
+  assert.equal(contracts.monotonicProgress(20, -5), 20);
+});
+
+test("streamed NDJSON survives every split boundary without loss or reordering", () => {
+  const wire = [
+    {type: "progress", percent: 1},
+    {type: "progress", percent: 42.5},
+    {type: "match", rowId: "r:0:9:0", text: "日本語"},
+  ].map(JSON.stringify).join("\n") + "\n";
+  for (let split = 0; split <= wire.length; split++) {
+    let state = contracts.ndjsonChunk("", wire.slice(0, split), false);
+    const events = [...state.events];
+    state = contracts.ndjsonChunk(state.rest, wire.slice(split), true);
+    events.push(...state.events);
+    assert.deepEqual(JSON.parse(JSON.stringify(events)), [
+      {type: "progress", percent: 1},
+      {type: "progress", percent: 42.5},
+      {type: "match", rowId: "r:0:9:0", text: "日本語"},
+    ], `split at character ${split}`);
+    assert.equal(state.rest, "");
+  }
+});
+
 test("thread events cannot render before the selected transcript is attached", () => {
   assert.equal(contracts.threadEventRoute({
     eventThreadId: "thread-1", currentThreadId: null, viewReady: false,

@@ -17,7 +17,7 @@ websocket framing. The bridge owns the process, exactly as the Electron app did.
 The protocol has no thread ownership model: several clients may resume the same
 thread, so Claude can steer a turn the UI is watching (`turn/steer`).
 """
-import json, os, queue, re, shutil, sqlite3, subprocess, sys, threading, time
+import base64, glob, hashlib, json, os, queue, re, shutil, sqlite3, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from project_registry import reconcile_projects
 
@@ -72,6 +72,365 @@ SKILL_ROOTS = _skill_roots()
 DRAFTS = {}
 DRAFT_LOCK = threading.Lock()
 DRAFT_EPOCH = 0
+
+TRANSCRIPT_PAGE_ROWS = 240
+CURSOR_VERSION = 1
+
+
+class TranscriptCursorError(ValueError):
+    """A page cursor no longer identifies the same journal boundary."""
+
+
+def _text_of(content):
+    if isinstance(content, str):
+        return content
+    out = ""
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                out += part.get("text") or part.get("content") or ""
+            elif isinstance(part, str):
+                out += part
+    return out
+
+
+def _error_text(error):
+    if isinstance(error, str):
+        return error
+    if not isinstance(error, dict):
+        return "Unknown API error" if error is None else str(error)
+    lines = []
+    message = error.get("message")
+    if message:
+        lines.append(str(message))
+    details = error.get("additionalDetails")
+    if details and details != message:
+        lines.append(str(details))
+    info = error.get("codexErrorInfo", error.get("codex_error_info"))
+    if info:
+        if isinstance(info, dict):
+            kind = info.get("type") or info.get("code") or json.dumps(info)
+        else:
+            kind = str(info)
+        if kind and not any(kind in line for line in lines):
+            lines.append(f"type: {kind}")
+    return "\n".join(lines) or json.dumps(error)
+
+
+def _rollout_sources(thread_id):
+    base = os.path.expanduser("~/.codex/sessions")
+    state_db = os.path.expanduser("~/.codex/state_5.sqlite")
+    if os.path.isfile(state_db):
+        try:
+            connection = sqlite3.connect(state_db)
+            try:
+                row = connection.execute(
+                    "SELECT rollout_path FROM threads WHERE id = ?", (thread_id,)
+                ).fetchone()
+            finally:
+                connection.close()
+            if row and row[0] and os.path.isfile(row[0]):
+                path = row[0]
+                return [{"path": path, "stat": os.stat(path)}]
+        except (sqlite3.Error, OSError):
+            pass
+    paths = sorted(f for f in glob.glob(os.path.join(base, "**", "*.jsonl"),
+                                        recursive=True) if thread_id in f)
+    return [{"path": path, "stat": os.stat(path)} for path in paths]
+
+
+def _revision(sources):
+    return ";".join(f"{s['stat'].st_mtime_ns}:{s['stat'].st_size}" for s in sources)
+
+
+def _generation(sources):
+    identity = [[s["path"], s["stat"].st_dev, s["stat"].st_ino] for s in sources]
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
+
+
+def _boundary_digest(source, offset):
+    """Fingerprint the immutable prefix at a cursor while allowing appends."""
+    size = source["stat"].st_size
+    if offset < 0 or offset > size:
+        raise TranscriptCursorError("cursor is beyond the journal")
+    with open(source["path"], "rb") as fh:
+        fh.seek(max(0, offset - 96))
+        sample = fh.read(offset - max(0, offset - 96))
+    return hashlib.sha256(sample).hexdigest()[:20]
+
+
+def _encode_cursor(thread_id, sources, file_index, offset):
+    if not sources:
+        return ""
+    payload = {"v": CURSOR_VERSION, "t": thread_id,
+               "g": _generation(sources), "f": file_index, "o": offset,
+               "b": _boundary_digest(sources[file_index], offset)}
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(value, thread_id, sources):
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        payload = json.loads(raw)
+        file_index, offset = int(payload["f"]), int(payload["o"])
+    except Exception as exc:
+        raise TranscriptCursorError("malformed transcript cursor") from exc
+    if payload.get("v") != CURSOR_VERSION or payload.get("t") != thread_id:
+        raise TranscriptCursorError("transcript cursor belongs to another thread or version")
+    if payload.get("g") != _generation(sources):
+        raise TranscriptCursorError("transcript journal was replaced")
+    if not 0 <= file_index < len(sources):
+        raise TranscriptCursorError("transcript cursor names a missing journal")
+    if payload.get("b") != _boundary_digest(sources[file_index], offset):
+        raise TranscriptCursorError("transcript cursor boundary changed")
+    return file_index, offset
+
+
+def _first_coord(sources):
+    return (0, 0) if sources else None
+
+
+def _complete_file_end(source):
+    """Byte boundary after the last newline-terminated record."""
+    stop = source["stat"].st_size
+    if not stop:
+        return 0
+    with open(source["path"], "rb") as fh:
+        fh.seek(stop - 1)
+        if fh.read(1) == b"\n":
+            return stop
+        position = stop
+        while position:
+            take = min(65536, position)
+            position -= take
+            fh.seek(position)
+            chunk = fh.read(take)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                return position + newline + 1
+    return 0
+
+
+def _end_coord(sources):
+    return (len(sources) - 1, _complete_file_end(sources[-1])) if sources else None
+
+
+def _coord_before(a, b):
+    return a[0] < b[0] or (a[0] == b[0] and a[1] < b[1])
+
+
+def _iter_forward(sources, start, end=None):
+    """Yield parsed JSONL records in physical byte order, never timestamp order."""
+    if not sources:
+        return
+    for file_index in range(start[0], len(sources)):
+        source = sources[file_index]
+        offset = start[1] if file_index == start[0] else 0
+        stop = (end[1] if end and file_index == end[0]
+                else source["stat"].st_size)
+        if end and file_index > end[0]:
+            break
+        with open(source["path"], "rb") as fh:
+            fh.seek(offset)
+            while fh.tell() < stop:
+                line_start = fh.tell()
+                line = fh.readline(stop - line_start)
+                line_end = fh.tell()
+                if not line:
+                    break
+                if not line.endswith(b"\n") and line_end == source["stat"].st_size:
+                    break  # an append still in flight; only complete records are authoritative
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                yield (file_index, line_start), (file_index, line_end), record
+
+
+def _iter_reverse_file(path, end_offset, block_size=65536):
+    """Yield complete lines before end_offset with byte bounds, newest first."""
+    with open(path, "rb") as fh:
+        cursor = end_offset
+        while cursor:
+            fh.seek(cursor - 1)
+            has_delimiter = fh.read(1) == b"\n"
+            content_end = cursor - 1 if has_delimiter else cursor
+            search_end, previous_newline = content_end, -1
+            while search_end:
+                start = max(0, search_end - block_size)
+                fh.seek(start)
+                index = fh.read(search_end - start).rfind(b"\n")
+                if index >= 0:
+                    previous_newline = start + index
+                    break
+                search_end = start
+            line_start = previous_newline + 1
+            fh.seek(line_start)
+            line = fh.read(content_end - line_start)
+            if line:
+                yield line_start, cursor, line
+            cursor = line_start
+
+
+def _iter_reverse(sources, end):
+    for file_index in range(end[0], -1, -1):
+        stop = end[1] if file_index == end[0] else sources[file_index]["stat"].st_size
+        size = sources[file_index]["stat"].st_size
+        if stop == size and stop:
+            stop = _complete_file_end(sources[file_index])
+        for line_start, line_end, line in _iter_reverse_file(sources[file_index]["path"], stop):
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            yield (file_index, line_start), (file_index, line_end), record
+
+
+def _is_turn_start(record):
+    payload = record.get("payload") or {}
+    return record.get("type") == "event_msg" and payload.get("type") == "task_started"
+
+
+def _row_id(coord, subindex=0):
+    return f"r:{coord[0]}:{coord[1]}:{subindex}"
+
+
+def _render_records(records):
+    rows, calls = [], {}
+    last_timestamp = None
+    inversions = 0
+    for coord, _line_end, rec in records:
+        payload = rec.get("payload") or {}
+        payload_type, timestamp = payload.get("type"), rec.get("timestamp")
+        if timestamp:
+            if last_timestamp is not None and timestamp < last_timestamp:
+                inversions += 1
+            last_timestamp = timestamp
+        if rec.get("type") == "event_msg":
+            if payload_type == "task_complete" and payload.get("error"):
+                rows.append({"id": _row_id(coord), "ts": timestamp, "cls": "err",
+                             "who": "API error", "text": _error_text(payload["error"])})
+            continue
+        if rec.get("type") != "response_item":
+            continue
+        if payload_type == "message":
+            role = payload.get("role")
+            if role == "developer":
+                continue
+            text = _text_of(payload.get("content"))
+            if not text.strip():
+                continue
+            match = re.match(r"\s*<([a-z_]+)>", text)
+            tag = match.group(1) if match else None
+            if tag in ("recommended_plugins", "skill", "environment_context",
+                       "user_instructions"):
+                rows.append({"id": _row_id(coord), "ts": timestamp, "cls": "scaffold",
+                             "who": tag.replace("_", " "), "text": text})
+                continue
+            commentary = role == "assistant" and payload.get("phase") == "commentary"
+            rows.append({"id": _row_id(coord), "ts": timestamp,
+                         "cls": "user" if role == "user" else
+                                ("rsn" if commentary else "agent"),
+                         "who": "you" if role == "user" else
+                                ("codex · thinking" if commentary else "codex"),
+                         "text": text})
+        elif payload_type == "agent_message":
+            text = _text_of(payload.get("content"))
+            if text.strip():
+                rows.append({"id": _row_id(coord), "ts": timestamp, "cls": "agent",
+                             "who": f"agent {payload.get('author') or ''}".strip(),
+                             "text": text})
+        elif payload_type in ("custom_tool_call", "function_call"):
+            command = payload.get("input") or payload.get("arguments") or ""
+            if not isinstance(command, str):
+                command = json.dumps(command)
+            index = len(rows)
+            rows.append({"id": _row_id(coord), "ts": timestamp, "cls": "cmd",
+                         "who": payload.get("name") or "tool", "text": command})
+            if payload.get("call_id"):
+                calls[payload["call_id"]] = index
+        elif payload_type in ("custom_tool_call_output", "function_call_output"):
+            output = payload.get("output")
+            if not isinstance(output, str):
+                output = json.dumps(output)
+            index = calls.get(payload.get("call_id"))
+            if index is not None:
+                rows[index]["text"] += "\n\n" + output[:6000]
+            else:
+                rows.append({"id": _row_id(coord), "ts": timestamp, "cls": "tool",
+                             "who": "output", "text": output[:6000]})
+    return rows, inversions
+
+
+def _groups_before(sources, boundary, target_rows):
+    groups, current, row_count = [], [], 0
+    for record in _iter_reverse(sources, boundary):
+        current.append(record)
+        if _is_turn_start(record[2]):
+            group = list(reversed(current))
+            groups.append(group)
+            row_count += len(_render_records(group)[0])
+            current = []
+            if row_count >= target_rows:
+                break
+    if current:
+        groups.append(list(reversed(current)))
+    groups.reverse()
+    records = [record for group in groups for record in group]
+    start = records[0][0] if records else boundary
+    return records, start
+
+
+def _groups_after(sources, boundary, target_rows):
+    groups, current, row_count = [], [], 0
+    end = _end_coord(sources) or boundary
+    for record in _iter_forward(sources, boundary):
+        if _is_turn_start(record[2]) and current:
+            groups.append(current)
+            row_count += len(_render_records(current)[0])
+            if row_count >= target_rows:
+                end = record[0]
+                current = []
+                break
+            current = []
+        current.append(record)
+    if current:
+        groups.append(current)
+        end = current[-1][1]
+    return [record for group in groups for record in group], end
+
+
+def _page(thread_id, sources, *, direction="tail", cursor="", limit=TRANSCRIPT_PAGE_ROWS):
+    if not sources:
+        return {"rows": [], "revision": "", "generation": _generation(sources),
+                "startCursor": "", "endCursor": "", "hasEarlier": False,
+                "hasLater": False, "journalWarning": ""}
+    beginning, journal_end = _first_coord(sources), _end_coord(sources)
+    if direction == "tail":
+        boundary = journal_end
+        records, page_start = _groups_before(sources, boundary, limit)
+        page_end = boundary
+    elif direction == "before":
+        boundary = _decode_cursor(cursor, thread_id, sources)
+        records, page_start = _groups_before(sources, boundary, limit)
+        page_end = boundary
+    elif direction == "after":
+        boundary = _decode_cursor(cursor, thread_id, sources)
+        records, page_end = _groups_after(sources, boundary, limit)
+        page_start = boundary
+    else:
+        raise TranscriptCursorError("unknown transcript page direction")
+    rows, inversions = _render_records(records)
+    warning = (f"source journal page contains {inversions} timestamp inversion(s); "
+               "displayed order follows source provenance" if inversions else "")
+    return {"rows": rows, "revision": _revision(sources),
+            "generation": _generation(sources),
+            "startCursor": _encode_cursor(thread_id, sources, *page_start),
+            "endCursor": _encode_cursor(thread_id, sources, *page_end),
+            "hasEarlier": _coord_before(beginning, page_start),
+            "hasLater": _coord_before(page_end, journal_end),
+            "journalWarning": warning}
 
 
 class AppServer:
@@ -239,6 +598,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, f.read(), "text/html; charset=utf-8")
         if self.path == "/events":
             return self._sse()
+        if self.path.startswith("/transcript/search"):
+            return self._transcript_search()
         if self.path.startswith("/transcript"):
             return self._transcript()
         if self.path.startswith("/draft"):
@@ -280,167 +641,125 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, json.dumps({"text": text, "epoch": epoch}).encode())
 
     def _transcript(self):
-        """The WHOLE conversation, render-ready, straight from the rollout JSONL.
-
-        The rollout is the authoritative record: ordered, timestamped, and
-        complete -- it holds tool calls and their output, which
-        `thread/turns/list` does not replay for legacy-history threads. Reading
-        it directly removes the need for any client-side cache, which was the
-        source of duplicated, misordered and mis-stamped messages.
-        """
+        """Return one complete-turn page directly from the rollout journal."""
         from urllib.parse import urlparse, parse_qs
-        import glob
         q = parse_qs(urlparse(self.path).query)
         tid = (q.get("id") or [""])[0]
         known_revision = (q.get("revision") or [""])[0]
         if not tid:
             return self._send(400, b'{"error":"no id"}')
-
-        def text_of(c):
-            if isinstance(c, str):
-                return c
-            out = ""
-            if isinstance(c, list):
-                for part in c:
-                    if isinstance(part, dict):
-                        out += part.get("text") or part.get("content") or ""
-                    elif isinstance(part, str):
-                        out += part
-            return out
-
-        def error_text(error):
-            if isinstance(error, str):
-                return error
-            if not isinstance(error, dict):
-                return "Unknown API error" if error is None else str(error)
-            lines = []
-            message = error.get("message")
-            if message:
-                lines.append(str(message))
-            details = error.get("additionalDetails")
-            if details and details != message:
-                lines.append(str(details))
-            info = error.get("codexErrorInfo", error.get("codex_error_info"))
-            if info:
-                if isinstance(info, dict):
-                    kind = info.get("type") or info.get("code") or json.dumps(info)
-                else:
-                    kind = str(info)
-                if kind and not any(kind in line for line in lines):
-                    lines.append(f"type: {kind}")
-            return "\n".join(lines) or json.dumps(error)
-
-        rows, calls, revision = [], {}, ""
-        last_timestamp = None
-        timestamp_inversions = 0
         try:
-            base = os.path.expanduser("~/.codex/sessions")
-            files = sorted(f for f in glob.glob(os.path.join(base, "**", "*.jsonl"),
-                                                recursive=True) if tid in f)
-            stats = [os.stat(f) for f in files]
-            revision = ";".join(
-                f"{stat.st_mtime_ns}:{stat.st_size}" for stat in stats)
-            # Reconciliation asks frequently only to learn whether the rollout
-            # changed. File metadata is enough for the append-only journal;
-            # avoid reparsing hundreds of MB and returning the same multi-MB
-            # JSON snapshot every few seconds while an idle thread is open.
+            sources = _rollout_sources(tid)
+            revision = _revision(sources)
             if known_revision and known_revision == revision:
                 return self._send(200, json.dumps({
                     "unchanged": True, "revision": revision,
                 }).encode())
-            for f in files:
-                with open(f) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except Exception:
-                            continue
-                        pay = rec.get("payload") or {}
-                        pt, ts = pay.get("type"), rec.get("timestamp")
-                        if ts:
-                            if last_timestamp is not None and ts < last_timestamp:
-                                timestamp_inversions += 1
-                            last_timestamp = ts
+            direction = "tail"
+            cursor = ""
+            if (q.get("before") or [""])[0]:
+                direction, cursor = "before", q["before"][0]
+            elif (q.get("after") or [""])[0]:
+                direction, cursor = "after", q["after"][0]
+            limit = max(1, min(1000, int((q.get("limit") or [TRANSCRIPT_PAGE_ROWS])[0])))
+            result = _page(tid, sources, direction=direction, cursor=cursor, limit=limit)
+            return self._send(200, json.dumps(result).encode())
+        except TranscriptCursorError as exc:
+            return self._send(409, json.dumps({"error": str(exc),
+                                               "cursorInvalid": True}).encode())
+        except Exception as exc:
+            return self._send(200, json.dumps({"rows": [], "error": str(exc)}).encode())
 
-                        # Terminal API failures are journal events rather than
-                        # response items. Without replaying them, an inactive
-                        # thread only flashes red in the sidebar and opening it
-                        # later gives no explanation for the failed turn.
-                        if rec.get("type") == "event_msg":
-                            if pt == "task_complete" and pay.get("error"):
-                                rows.append({"ts": ts, "cls": "err",
-                                             "who": "API error",
-                                             "text": error_text(pay["error"])})
-                            continue
-                        if rec.get("type") != "response_item":
-                            continue
+    def _transcript_search_events(self, tid, query, direction="forward", anchor=""):
+        """Yield NDJSON-ready progress and one result without retaining an index."""
+        sources = _rollout_sources(tid)
+        total = sum(source["stat"].st_size for source in sources)
+        needle = query.casefold()
+        anchor_key = None
+        match = re.fullmatch(r"r:(\d+):(\d+):(\d+)", anchor or "")
+        if match:
+            anchor_key = tuple(map(int, match.groups()))
+        scanned_base = 0
+        next_progress = 0
+        first_match = last_match = None
+        chosen = None
+        records = []
 
-                        if pt == "message":
-                            role = pay.get("role")
-                            if role == "developer":
-                                continue          # system scaffolding, not conversation
-                            txt = text_of(pay.get("content"))
-                            if not txt.strip():
-                                continue
-                            # Injected scaffolding is not conversation: a single
-                            # <recommended_plugins> block is 36k chars and buries
-                            # the start of the thread. Mark it so the client can
-                            # collapse it instead of rendering it as a message.
-                            m = re.match(r"\s*<([a-z_]+)>", txt)
-                            tag = m.group(1) if m else None
-                            if tag in ("recommended_plugins", "skill",
-                                       "environment_context", "user_instructions"):
-                                rows.append({"ts": ts, "cls": "scaffold",
-                                             "who": tag.replace("_", " "),
-                                             "text": txt})
-                                continue
-                            commentary = role == "assistant" and pay.get("phase") == "commentary"
-                            rows.append({"ts": ts,
-                                         "cls": "user" if role == "user" else
-                                                ("rsn" if commentary else "agent"),
-                                         "who": "you" if role == "user" else
-                                                ("codex · thinking" if commentary else "codex"),
-                                         "text": txt})
-                        elif pt == "agent_message":
-                            txt = text_of(pay.get("content"))
-                            if txt.strip():
-                                rows.append({"ts": ts, "cls": "agent",
-                                             "who": f"agent {pay.get('author') or ''}".strip(),
-                                             "text": txt})
-                        elif pt in ("custom_tool_call", "function_call"):
-                            cmd = pay.get("input") or pay.get("arguments") or ""
-                            if not isinstance(cmd, str):
-                                cmd = json.dumps(cmd)
-                            idx = len(rows)
-                            rows.append({"ts": ts, "cls": "cmd",
-                                         "who": pay.get("name") or "tool",
-                                         "text": cmd})
-                            cid = pay.get("call_id")
-                            if cid:
-                                calls[cid] = idx
-                        elif pt in ("custom_tool_call_output", "function_call_output"):
-                            cid = pay.get("call_id")
-                            out = pay.get("output")
-                            if not isinstance(out, str):
-                                out = json.dumps(out)
-                            i = calls.get(cid)
-                            if i is not None:
-                                rows[i]["text"] += "\n\n" + out[:6000]
-                            else:
-                                rows.append({"ts": ts, "cls": "tool",
-                                             "who": "output", "text": out[:6000]})
-        except Exception as e:
-            return self._send(200, json.dumps({"rows": [], "error": str(e)}).encode())
+        def consider(group):
+            nonlocal first_match, last_match, chosen
+            rows, _ = _render_records(group)
+            for row in rows:
+                if needle not in f"{row.get('who', '')}\n{row.get('text', '')}".casefold():
+                    continue
+                parts = tuple(map(int, row["id"].split(":")[1:]))
+                candidate = (row, group[0][0])
+                if first_match is None:
+                    first_match = candidate
+                last_match = candidate
+                if direction == "backward":
+                    if anchor_key is None or parts < anchor_key:
+                        chosen = candidate
+                elif chosen is None and (anchor_key is None or parts > anchor_key):
+                    chosen = candidate
 
-        warning = (f"source journal contains {timestamp_inversions} timestamp "
-                   "inversion(s); displayed order follows source provenance"
-                   if timestamp_inversions else "")
-        return self._send(200, json.dumps({"rows": rows, "count": len(rows),
-                                          "revision": revision,
-                                          "journalWarning": warning}).encode())
+        for file_index, source in enumerate(sources):
+            for record in _iter_forward(sources, (file_index, 0),
+                                        (file_index, source["stat"].st_size)):
+                if _is_turn_start(record[2]) and records:
+                    consider(records)
+                    records = []
+                    if direction == "forward" and chosen is not None:
+                        break
+                records.append(record)
+                scanned = scanned_base + record[1][1]
+                if scanned >= next_progress:
+                    yield {"type": "progress", "scanned": scanned, "total": total,
+                           "percent": 100 if not total else min(100, scanned * 100 / total)}
+                    next_progress = scanned + 1024 * 1024
+            if direction == "forward" and chosen is not None:
+                break
+            if records:
+                consider(records)
+                records = []
+            scanned_base += source["stat"].st_size
+        if chosen is None:
+            chosen = last_match if direction == "backward" else first_match
+        yield {"type": "progress", "scanned": total, "total": total, "percent": 100}
+        if chosen:
+            row, group_start = chosen
+            cursor = _encode_cursor(tid, sources, *group_start)
+            page = _page(tid, sources, direction="after", cursor=cursor)
+            yield {"type": "match", "rowId": row["id"], "page": page}
+        else:
+            yield {"type": "done", "found": False}
+
+    def _transcript_search(self):
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(self.path).query)
+        tid = (q.get("id") or [""])[0]
+        query = (q.get("q") or [""])[0]
+        direction = (q.get("direction") or ["forward"])[0]
+        anchor = (q.get("anchor") or [""])[0]
+        if not tid or not query or direction not in ("forward", "backward"):
+            return self._send(400, b'{"error":"id, q, and valid direction are required"}')
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            for event in self._transcript_search_events(tid, query, direction, anchor):
+                self.wfile.write(json.dumps(event).encode() + b"\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            try:
+                self.wfile.write(json.dumps({"type": "error", "error": str(exc)}).encode() + b"\n")
+                self.wfile.flush()
+            except Exception:
+                pass
 
     def _itemtimes(self):
         """Real per-message timestamps, from the thread's rollout JSONL.

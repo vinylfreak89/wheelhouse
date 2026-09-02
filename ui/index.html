@@ -94,6 +94,11 @@ button{font:inherit}
   border-radius:6px;background:var(--panel);color:var(--dim);cursor:pointer}
 #findbar button:hover{border-color:var(--accent);color:var(--fg)}
 #findstatus{min-width:62px;color:var(--dim2);font-size:10.5px;text-align:right}
+#findprogress{position:absolute;left:7px;right:7px;bottom:2px;height:2px;
+  background:transparent;overflow:hidden;border-radius:2px}
+#findprogress i{display:block;width:0;height:100%;background:var(--accent);
+  transition:width .08s linear}
+#findbar.searching #findprogress{background:var(--panel3)}
 
 /* ---------- main ---------- */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
@@ -113,6 +118,8 @@ button{font:inherit}
 #history,#live{display:contents}
 #live[hidden]{display:none}
 .msg{margin-bottom:15px;max-width:840px}
+.msg.search-target{outline:1px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:6px;border-radius:3px}
 .msg.pending{display:none}
 .history-boundary{display:block;margin:4px auto 15px;padding:5px 10px;border:1px solid var(--line);
   border-radius:999px;background:var(--panel);color:var(--dim2);font-size:10.5px;cursor:pointer}
@@ -309,6 +316,7 @@ select.mini:focus{outline:none;border-color:var(--accent)}
   <button id="findprev" title="Previous match (Shift-Command-G)">↑</button>
   <button id="findnext" title="Next match (Command-G)">↓</button>
   <button id="findclose" title="Close (Escape)">×</button>
+  <span id="findprogress" aria-hidden="true"><i></i></span>
 </div>
 
 <div id="mask"><div id="modal">
@@ -490,6 +498,40 @@ const UIContracts=Object.freeze({
     return {start:Math.max(0,Math.min(start,total)),
             end:Math.max(0,Math.min(end,total))};
   },
+  transcriptPages(pages,page,{direction="reset",maxPages=3}={}){
+    if(!page||!Array.isArray(page.rows)) return pages||[];
+    const current=Array.isArray(pages)?pages:[];
+    if(direction==="reset"||!current.length||
+       current[0].generation!==page.generation) return [page];
+    if(current.some(candidate=>candidate.startCursor===page.startCursor&&
+       candidate.endCursor===page.endCursor)) return current;
+    let next=direction==="earlier"?[page,...current]:[...current,page];
+    // Cursor requests can be retried after a delayed scroll callback. Stable
+    // row ids make that harmless rather than duplicating transcript content.
+    const seen=new Set();
+    next=next.map(candidate=>Object.assign({},candidate,{rows:candidate.rows.filter(row=>{
+      if(!row.id||seen.has(row.id)) return false;
+      seen.add(row.id); return true;
+    })}));
+    if(next.length>maxPages)
+      next=direction==="earlier"?next.slice(0,maxPages):next.slice(-maxPages);
+    return next;
+  },
+  transcriptRows(pages){
+    return (pages||[]).flatMap(page=>page.rows||[]);
+  },
+  monotonicProgress(previous,next){
+    previous=Math.max(0,Math.min(100,Number(previous)||0));
+    next=Math.max(0,Math.min(100,Number(next)||0));
+    return Math.max(previous,next);
+  },
+  ndjsonChunk(buffer,chunk,done=false){
+    const combined=String(buffer||"")+String(chunk||"");
+    const lines=combined.split("\n");
+    const rest=done?"":(lines.pop()||"");
+    if(done&&lines.length&&lines[lines.length-1]==="") lines.pop();
+    return {events:lines.filter(Boolean).map(line=>JSON.parse(line)),rest};
+  },
   threadEventRoute({eventThreadId,currentThreadId,viewReady}){
     if(!eventThreadId) return "global";
     if(!currentThreadId||!viewReady) return "not-ready";
@@ -590,15 +632,75 @@ const reviewerCache={};
 let DEFAULT_CWD="";        /* supplied by the bridge; see loadProjects */
 
 /* ---------- find ---------- */
-function requestFind(backwards=false){
-  const query=$("#findinp").value;
-  $("#findstatus").textContent=query?"":"type to find";
-  $("#findinp").classList.remove("miss");
-  if(query) revealHistoryMatch(query,backwards);
+let findController=null, findGeneration=0, findTimer=0;
+let findQuery="", findRowId="", findProgress=0;
+function nativeFind(query,backwards=false){
   const handler=window.webkit&&window.webkit.messageHandlers&&
     window.webkit.messageHandlers.find;
   if(handler) handler.postMessage({query,backwards});
   else if(query) window.updateFindResult(window.find(query,false,backwards,true));
+}
+function setFindProgress(percent,{active=true}={}){
+  findProgress=active?UIContracts.monotonicProgress(findProgress,percent):0;
+  $("#findbar").classList.toggle("searching",active);
+  $("#findprogress i").style.width=`${findProgress}%`;
+}
+async function requestFind(backwards=false){
+  clearTimeout(findTimer);
+  const query=$("#findinp").value;
+  if(findController) findController.abort();
+  const generation=++findGeneration;
+  if(!query){
+    findQuery=""; findRowId=""; setFindProgress(0,{active:false});
+    $("#findstatus").textContent="type to find"; nativeFind(""); return;
+  }
+  const sameQuery=query===findQuery;
+  const anchor=sameQuery?findRowId:"";
+  findQuery=query; findProgress=0; setFindProgress(0);
+  $("#findstatus").textContent="searching…";
+  $("#findinp").classList.remove("miss");
+  findController=new AbortController();
+  const params=new URLSearchParams({id:cur||"",q:query,
+    direction:backwards?"backward":"forward"});
+  if(anchor) params.set("anchor",anchor);
+  try{
+    const response=await fetch("/transcript/search?"+params,
+      {signal:findController.signal});
+    if(!response.ok||!response.body) throw new Error(`search failed (${response.status})`);
+    const reader=response.body.getReader(), decoder=new TextDecoder();
+    let buffer="", matched=false;
+    while(true){
+      const chunk=await reader.read();
+      const decoded=decoder.decode(chunk.value||new Uint8Array(),{stream:!chunk.done});
+      const parsed=UIContracts.ndjsonChunk(buffer,decoded,chunk.done);
+      buffer=parsed.rest;
+      for(const event of parsed.events){
+        if(generation!==findGeneration) return;
+        if(event.type==="progress"){
+          setFindProgress(event.percent);
+          $("#findstatus").textContent=`${Math.floor(findProgress)}%`;
+        }else if(event.type==="match"){
+          matched=true; findRowId=event.rowId;
+          installTranscriptPage(event.page,
+            {direction:"reset",focusRow:event.rowId,preserveLive:true});
+        }else if(event.type==="error") throw new Error(event.error);
+      }
+      if(chunk.done) break;
+    }
+    if(generation!==findGeneration) return;
+    setFindProgress(100,{active:false});
+    $("#findinp").classList.toggle("miss",!matched);
+    $("#findstatus").textContent=matched?"match":"no matches";
+    if(matched) nativeFind(query,backwards); else nativeFind("");
+  }catch(error){
+    if(error.name==="AbortError") return;
+    if(generation!==findGeneration) return;
+    setFindProgress(0,{active:false});
+    $("#findinp").classList.add("miss");
+    $("#findstatus").textContent="search error";
+  }finally{
+    if(generation===findGeneration) findController=null;
+  }
 }
 window.openFind=()=>{
   const bar=$("#findbar"), input=$("#findinp");
@@ -618,14 +720,19 @@ window.updateFindResult=found=>{
   $("#findstatus").textContent=hasQuery?(found?"match":"no matches"):"type to find";
 };
 function closeFind(){
+  if(findController) findController.abort();
+  findController=null; ++findGeneration; clearTimeout(findTimer);
   $("#findbar").classList.remove("on");
   $("#findstatus").textContent="";
-  historyFindQuery=""; historyFindIndex=-1;
-  const handler=window.webkit&&window.webkit.messageHandlers&&
-    window.webkit.messageHandlers.find;
-  if(handler) handler.postMessage({query:"",backwards:false});
+  findQuery=""; findRowId=""; setFindProgress(0,{active:false});
+  nativeFind("");
 }
-$("#findinp").oninput=()=>requestFind(false);
+$("#findinp").oninput=()=>{
+  clearTimeout(findTimer);
+  if(findController) findController.abort();
+  ++findGeneration; setFindProgress(0,{active:false});
+  findTimer=setTimeout(()=>requestFind(false),180);
+};
 $("#findinp").onkeydown=e=>{
   if(e.key==="Escape"){ e.preventDefault(); closeFind(); }
   else if(e.key==="Enter"){ e.preventDefault(); requestFind(e.shiftKey); }
@@ -657,8 +764,9 @@ async function respond(id,result,error){
 /* ---------- rendering ---------- */
 const itemEls={};                 // item id -> .msg element, for in-place updates
 const HISTORY_WINDOW=240, HISTORY_CHUNK=80;
-let historyRows=[], historyRange={start:0,end:0}, historyWarning="";
-let historyShiftFrame=0, historyFindQuery="", historyFindIndex=-1;
+const HISTORY_MAX_PAGES=3;
+let historyPages=[], historyRows=[], historyRange={start:0,end:0}, historyWarning="";
+let historyShiftFrame=0, historyPageLoading=false;
 const liveErrorKeys=new Set();
 
 function showApiError(label,error,{threadId=cur,turnId=""}={}){
@@ -882,8 +990,7 @@ function appendItemDelta(itemId,{cls="agent",who="codex",delta=""}={}){
 }
 
 function clearTranscriptPane(){
-  historyRows=[]; historyRange={start:0,end:0}; historyWarning="";
-  historyFindQuery=""; historyFindIndex=-1;
+  historyPages=[]; historyRows=[]; historyRange={start:0,end:0}; historyWarning="";
   liveErrorKeys.clear();
   for(const key in itemEls) delete itemEls[key];
   historyEl.replaceChildren(); liveEl.replaceChildren();
@@ -905,15 +1012,22 @@ function renderHistoryRow(row,index){
         `(${full.length.toLocaleString()} chars — click to expand)`; };
   }else body=add(row.cls,row.who,row.text,isNaN(ms)?null:ms);
   body.parentElement.dataset.historyIndex=String(index);
+  if(row.id) body.parentElement.dataset.rowId=row.id;
 }
 
-function historyBoundary(direction,count){
+function historyBoundary(direction,count=null){
   const button=document.createElement("button");
   button.className="history-boundary";
-  button.textContent=direction==="earlier"?`↑ ${count.toLocaleString()} earlier entries`:
-    `↓ ${count.toLocaleString()} later entries`;
+  const amount=count===null?"load":count.toLocaleString();
+  button.textContent=direction==="earlier"?`↑ ${amount} earlier entries`:
+    `↓ ${amount} later entries`;
   button.onclick=()=>shiftHistory(direction);
   logTarget.append(button);
+}
+
+function hasEarlierHistory(){ return Boolean(historyPages[0]&&historyPages[0].hasEarlier); }
+function hasLaterHistory(){
+  return Boolean(historyPages.length&&historyPages[historyPages.length-1].hasLater);
 }
 
 function visibleHistoryAnchor(nextRange){
@@ -937,10 +1051,12 @@ function renderHistoryWindow(nextRange,{preserveAnchor=false}={}){
     if(historyWarning&&nextRange.start===0)
       add("err","journal warning",historyWarning,null);
     if(nextRange.start>0) historyBoundary("earlier",nextRange.start);
+    else if(hasEarlierHistory()) historyBoundary("earlier");
     historyRows.slice(nextRange.start,nextRange.end).forEach((row,offset)=>
       renderHistoryRow(row,nextRange.start+offset));
     if(nextRange.end<historyRows.length)
       historyBoundary("later",historyRows.length-nextRange.end);
+    else if(hasLaterHistory()) historyBoundary("later");
   }finally{
     replaying=false; logTarget=liveEl;
   }
@@ -949,21 +1065,45 @@ function renderHistoryWindow(nextRange,{preserveAnchor=false}={}){
   // The live tail is newer than every persisted transcript row. Hide it while
   // an older window is mounted so the view cannot visually jump across an
   // omitted middle section; it returns when scrolling reaches the real tail.
-  liveEl.hidden=nextRange.end<historyRows.length;
+  liveEl.hidden=nextRange.end<historyRows.length||hasLaterHistory();
   if(anchorIndex!==null&&anchorIndex!==undefined){
     const replacement=historyEl.querySelector(`[data-history-index="${anchorIndex}"]`);
     if(replacement) logEl.scrollTop+=replacement.getBoundingClientRect().top-anchorTop;
   }
 }
 
+async function loadHistoryPage(direction){
+  if(historyPageLoading||!cur||!historyPages.length) return;
+  const edge=direction==="earlier"?historyPages[0]:historyPages[historyPages.length-1];
+  const cursor=direction==="earlier"?edge.startCursor:edge.endCursor;
+  if(!cursor) return;
+  historyPageLoading=true;
+  try{
+    const response=await fetch(`/transcript?id=${encodeURIComponent(cur)}&${direction==="earlier"?"before":"after"}=${encodeURIComponent(cursor)}`);
+    const page=await response.json();
+    if(response.status===409||page.cursorInvalid){
+      const fresh=await (await fetch("/transcript?id="+encodeURIComponent(cur))).json();
+      installTranscriptPage(fresh,{direction:"reset"});
+      return;
+    }
+    if(page.error) return;
+    installTranscriptPage(page,{direction});
+  }catch(error){}
+  finally{ historyPageLoading=false; }
+}
+
 function shiftHistory(direction){
-  if(!historyRows.length) return;
+  if(!historyPages.length) return;
   const firstVisible=visibleHistoryAnchor(historyRange);
   const anchor=firstVisible?Number(firstVisible.dataset.historyIndex):null;
   const next=UIContracts.virtualRange({total:historyRows.length,
     start:historyRange.start,end:historyRange.end,direction,
     windowSize:HISTORY_WINDOW,chunkSize:HISTORY_CHUNK,anchor});
-  if(next.start===historyRange.start&&next.end===historyRange.end) return;
+  if(next.start===historyRange.start&&next.end===historyRange.end){
+    if((direction==="earlier"&&hasEarlierHistory())||
+       (direction==="later"&&hasLaterHistory())) loadHistoryPage(direction);
+    return;
+  }
   renderHistoryWindow(next,{preserveAnchor:true});
 }
 
@@ -971,40 +1111,11 @@ logEl.addEventListener("scroll",()=>{
   if(historyShiftFrame) return;
   historyShiftFrame=requestAnimationFrame(()=>{
     historyShiftFrame=0;
-    if(logEl.scrollTop<240&&historyRange.start>0) shiftHistory("earlier");
+    if(logEl.scrollTop<240&&(historyRange.start>0||hasEarlierHistory())) shiftHistory("earlier");
     else if(logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<240&&
-            historyRange.end<historyRows.length) shiftHistory("later");
+            (historyRange.end<historyRows.length||hasLaterHistory())) shiftHistory("later");
   });
 });
-
-function revealHistoryMatch(query,backwards){
-  const needle=String(query||"").toLocaleLowerCase();
-  if(!needle||!historyRows.length) return false;
-  if(needle!==historyFindQuery){
-    historyFindQuery=needle;
-    historyFindIndex=backwards?historyRange.end:historyRange.start-1;
-  }
-  const step=backwards?-1:1, total=historyRows.length;
-  for(let offset=1;offset<=total;offset++){
-    const index=(historyFindIndex+step*offset+total*2)%total;
-    const row=historyRows[index];
-    if(!`${row.who||""}\n${row.text||""}`.toLocaleLowerCase().includes(needle))
-      continue;
-    historyFindIndex=index;
-    if(index<historyRange.start||index>=historyRange.end){
-      const start=Math.max(0,Math.min(index-Math.floor(HISTORY_WINDOW/2),
-        Math.max(0,total-HISTORY_WINDOW)));
-      renderHistoryWindow({start,end:Math.min(total,start+HISTORY_WINDOW)});
-    }
-    const node=historyEl.querySelector(`[data-history-index="${index}"]`);
-    if(node){
-      const pane=logEl.getBoundingClientRect(), rect=node.getBoundingClientRect();
-      logEl.scrollTop+=rect.top-pane.top-Math.floor(logEl.clientHeight/3);
-    }
-    return true;
-  }
-  return false;
-}
 
 /* ---------- protocol pane ---------- */
 /* Routine polling drowns the pane: thread/list alone fires every second and
@@ -1678,33 +1789,68 @@ function askConfirm(msg){
 }
 
 /* ---------- open ---------- */
-/* Build a transcript off-DOM, then swap it into place in one operation. The
-   former open_ cleared #log before two network requests; reconciliation after
-   every completed turn therefore left a conspicuous blank pane while it
-   fetched the same conversation again. */
-function renderTranscript(rows,{atEnd=true,scrollTop=0,revision="",journalWarning=""}={}){
-  const previousRange=historyRange;
-  historyRows=rows; historyWarning=journalWarning;
-  liveErrorKeys.clear();
-  for(const k in itemEls) delete itemEls[k];
-  liveEl.replaceChildren(); logTarget=liveEl;
-  let range=UIContracts.virtualRange({total:rows.length,direction:"tail",
+/* Keep at most three journal pages in browser memory. Each page is read from
+   the rollout on demand; there is no transcript cache in either process. */
+function installTranscriptPage(page,{direction="reset",focusRow="",preserveLive=false}={}){
+  if(!page||!Array.isArray(page.rows)) return;
+  const paneTop=logEl.getBoundingClientRect().top;
+  const anchor=[...historyEl.querySelectorAll(".msg[data-row-id]")].find(node=>
+    node.getBoundingClientRect().bottom>paneTop);
+  const anchorId=anchor&&anchor.dataset.rowId;
+  const anchorTop=anchor&&anchor.getBoundingClientRect().top;
+  historyPages=UIContracts.transcriptPages(historyPages,page,
+    {direction,maxPages:HISTORY_MAX_PAGES});
+  historyRows=UIContracts.transcriptRows(historyPages);
+  historyWarning=[...new Set(historyPages.map(p=>p.journalWarning).filter(Boolean))].join("\n");
+  if(direction==="reset"&&!preserveLive){
+    liveErrorKeys.clear();
+    for(const k in itemEls) delete itemEls[k];
+    liveEl.replaceChildren();
+  }
+  logTarget=liveEl;
+  let range=UIContracts.virtualRange({total:historyRows.length,direction:"tail",
     windowSize:HISTORY_WINDOW,chunkSize:HISTORY_CHUNK});
-  if(!atEnd&&previousRange.end>previousRange.start){
-    const start=Math.min(previousRange.start,Math.max(0,rows.length-1));
-    range={start,end:Math.min(rows.length,Math.max(start+1,previousRange.end))};
+  if(focusRow){
+    const index=historyRows.findIndex(row=>row.id===focusRow);
+    if(index>=0){
+      const start=Math.max(0,Math.min(index-Math.floor(HISTORY_WINDOW/3),
+        Math.max(0,historyRows.length-HISTORY_WINDOW)));
+      range={start,end:Math.min(historyRows.length,start+HISTORY_WINDOW)};
+    }
+  }else if(direction!=="reset"&&anchorId){
+    const index=historyRows.findIndex(row=>row.id===anchorId);
+    if(index>=0){
+      const visible=Math.max(1,historyRange.end-historyRange.start);
+      range={start:Math.max(0,index),end:Math.min(historyRows.length,index+visible)};
+    }
   }
   renderHistoryWindow(range);
+  if(anchorId&&!focusRow){
+    const replacement=historyEl.querySelector(`[data-row-id="${CSS.escape(anchorId)}"]`);
+    if(replacement) logEl.scrollTop+=replacement.getBoundingClientRect().top-anchorTop;
+  }
+  if(focusRow){
+    const node=historyEl.querySelector(`[data-row-id="${CSS.escape(focusRow)}"]`);
+    if(node){
+      node.classList.add("search-target");
+      const pane=logEl.getBoundingClientRect(), rect=node.getBoundingClientRect();
+      logEl.scrollTop+=rect.top-pane.top-Math.floor(logEl.clientHeight/3);
+    }
+  }
   // Local sends are drawn optimistically before app-server has necessarily
   // appended them to the rollout. Keep only those uncommitted echoes in the
   // live tail; persisted history remains virtualized above it.
-  for(const entry of UIContracts.optimisticEchoesMissingFromTranscript(
-    optimisticUserEchoes,{threadId:cur,rows})){
-    add("user",entry.who,entry.text,entry.at);
+  if(direction==="reset"&&!preserveLive){
+    for(const entry of UIContracts.optimisticEchoesMissingFromTranscript(
+      optimisticUserEchoes,{threadId:cur,rows:historyRows})){
+      add("user",entry.who,entry.text,entry.at);
+    }
   }
-  renderedFromRollout=rows.length;
-  transcriptRevision=revision;
-  logEl.scrollTop=atEnd?logEl.scrollHeight:scrollTop;
+  renderedFromRollout=historyRows.length;
+  transcriptRevision=page.revision||transcriptRevision;
+  transcriptGeneration=page.generation||transcriptGeneration;
+  const stick=direction==="reset"&&!focusRow;
+  if(stick) logEl.scrollTop=logEl.scrollHeight;
 }
 
 let openGeneration=0;
@@ -1735,10 +1881,9 @@ async function open_(id){
   // ordered, timestamped, and complete, including tool calls and their output
   // (which thread/turns/list does not replay). No client-side cache: that
   // workaround was what duplicated, misordered and mis-stamped messages.
-  let rows=[], revision="", journalWarning="";
+  let page={rows:[]};
   try{
-    const t=await (await fetch("/transcript?id="+encodeURIComponent(id))).json();
-    rows=t.rows||[]; revision=t.revision||""; journalWarning=t.journalWarning||"";
+    page=await (await fetch("/transcript?id="+encodeURIComponent(id))).json();
   }catch(e){}
   if(generation!==openGeneration||cur!==id) return;
 
@@ -1751,7 +1896,7 @@ async function open_(id){
   // Otherwise the header can advertise the DB value while turn/start omits it
   // and the app-server silently reuses an older loaded-thread cwd.
   await loadMeta(id);
-  renderTranscript(rows,{revision,journalWarning});
+  installTranscriptPage(page,{direction:"reset"});
 
   input.value=await loadDraft(id);
 
@@ -1772,6 +1917,7 @@ async function open_(id){
 }
 let renderedFromRollout=0;
 let transcriptRevision="";
+let transcriptGeneration="";
 
 /* ---------- new thread ---------- */
 window.openNewThread=()=>{
@@ -2202,16 +2348,17 @@ async function reconcile(){
   try{
     let url="/transcript?id="+encodeURIComponent(cur);
     if(transcriptRevision) url+="&revision="+encodeURIComponent(transcriptRevision);
-    const t=await (await fetch(url)).json();
-    if(t.unchanged) return;
-    const rows=t.rows||[], n=rows.length;
-    const revision=t.revision||"";
-    if((revision&&revision!==transcriptRevision)||(!revision&&n!==renderedFromRollout)){
-      const atEnd=logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<80;
-      const previousTop=logEl.scrollTop;
-      renderTranscript(rows,{atEnd,scrollTop:previousTop,revision,
-        journalWarning:t.journalWarning||""});
-    }
+    const probe=await (await fetch(url)).json();
+    if(probe.unchanged) return;
+    // A changed revision can be an append or a journal replacement. Fetch an
+    // authoritative tail page. If the reader is looking at an older page, do
+    // not yank the viewport; its later boundary will load the new tail when
+    // requested. At the tail, replace atomically so dropped SSE is repaired.
+    const atEnd=!hasLaterHistory()&&
+      logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<80;
+    if(!atEnd){ transcriptRevision=probe.revision||transcriptRevision; return; }
+    const page=await (await fetch("/transcript?id="+encodeURIComponent(cur))).json();
+    installTranscriptPage(page,{direction:"reset"});
   }catch(e){}
   finally{ reconciling=false; }
 }

@@ -158,7 +158,7 @@ function harness(threadMeta) {
     renderList() {},
     loadAgents() {},
     reconcile() {},
-    renderTranscript() {},
+    installTranscriptPage() {},
     showCwd() {},
     async rpc(method, params) {
       if (method === "thread/resume")

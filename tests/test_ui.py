@@ -174,6 +174,28 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn('fullScreen.keyEquivalentModifierMask = [.command, .control]',
                       self.native)
 
+    def test_find_streams_whole_journal_progress_and_cancels_stale_searches(self):
+        find = self.html.split("/* ---------- find ---------- */", 1)[1].split(
+            "async function rpc", 1)[0]
+        self.assertIn('fetch("/transcript/search?"+params', find)
+        self.assertIn("response.body.getReader()", find)
+        self.assertIn("findController.abort()", find)
+        self.assertIn("generation!==findGeneration", find)
+        self.assertIn("UIContracts.ndjsonChunk", find)
+        self.assertIn("UIContracts.monotonicProgress", find)
+        self.assertIn('id="findprogress"', self.html)
+        self.assertNotIn("localStorage", find)
+        self.assertNotIn("sessionStorage", find)
+
+    def test_search_navigation_preserves_the_live_stream_and_targets_exact_row(self):
+        find = self.html.split("/* ---------- find ---------- */", 1)[1].split(
+            "async function rpc", 1)[0]
+        self.assertIn('preserveLive:true', find)
+        install = self.html.split("function installTranscriptPage", 1)[1].split(
+            "let openGeneration", 1)[0]
+        self.assertIn('if(direction==="reset"&&!preserveLive)', install)
+        self.assertIn('node.classList.add("search-target")', install)
+
     def test_usage_renders_all_rate_limit_buckets_and_visible_errors(self):
         body = self.html.split("async function loadUsage", 1)[1].split(
             "/* ---------- effective settings", 1)[0]
@@ -252,7 +274,7 @@ class UiStaticTests(unittest.TestCase):
         self.assertLess(expiry, current_filter)
 
     def test_reconciliation_replaces_offscreen_without_reopening_thread(self):
-        render = self.html.split("function renderTranscript", 1)[1].split(
+        render = self.html.split("function installTranscriptPage", 1)[1].split(
             "let openGeneration", 1)[0]
         self.assertIn("renderHistoryWindow(range)", render)
         window = self.html.split("function renderHistoryWindow", 1)[1].split(
@@ -261,7 +283,7 @@ class UiStaticTests(unittest.TestCase):
         self.assertIn("historyEl.replaceChildren(staging)", window)
         reconcile = self.html.split("async function reconcile", 1)[1].split(
             "/* ---------- events", 1)[0]
-        self.assertIn("renderTranscript(rows", reconcile)
+        self.assertIn('installTranscriptPage(page,{direction:"reset"})', reconcile)
         self.assertIn("if(busy) return", reconcile)
         self.assertNotIn("open_(cur)", reconcile)
 
@@ -272,12 +294,15 @@ class UiStaticTests(unittest.TestCase):
             "function shiftHistory", 1)[0]
         self.assertIn("historyRows.slice(nextRange.start,nextRange.end)", window)
         self.assertIn("historyEl.replaceChildren(staging)", window)
-        self.assertIn("liveEl.hidden=nextRange.end<historyRows.length", window)
-        transcript = self.html.split("function renderTranscript", 1)[1].split(
+        self.assertIn("liveEl.hidden=nextRange.end<historyRows.length||hasLaterHistory()", window)
+        transcript = self.html.split("function installTranscriptPage", 1)[1].split(
             "let openGeneration", 1)[0]
-        self.assertIn("historyRows=rows", transcript)
+        self.assertIn("UIContracts.transcriptPages", transcript)
+        self.assertIn("UIContracts.transcriptRows", transcript)
+        self.assertIn('if(direction==="reset"&&!preserveLive)', transcript)
         self.assertIn("liveEl.replaceChildren()", transcript)
-        self.assertNotIn("for(const row of rows)", transcript)
+        self.assertIn("const HISTORY_MAX_PAGES=3", self.html)
+        self.assertIn('before":"after"', self.html)
         self.assertIn('logEl.addEventListener("scroll"', self.html)
         self.assertIn("shiftHistory(\"earlier\")", self.html)
         self.assertIn("shiftHistory(\"later\")", self.html)
@@ -328,7 +353,7 @@ class UiStaticTests(unittest.TestCase):
         self.assertNotIn("already shown when we sent it", completed)
 
     def test_navigation_rebuilds_uncommitted_user_echoes(self):
-        render = self.html.split("function renderTranscript", 1)[1].split(
+        render = self.html.split("function installTranscriptPage", 1)[1].split(
             "let openGeneration", 1)[0]
         self.assertIn("optimisticEchoesMissingFromTranscript", render)
         self.assertIn('add("user",entry.who,entry.text,entry.at)', render)
@@ -359,7 +384,7 @@ class UiStaticTests(unittest.TestCase):
             "/* ---------- events", 1)[0]
         self.assertIn('"&revision="+encodeURIComponent(transcriptRevision)',
                       reconcile)
-        self.assertIn("if(t.unchanged) return", reconcile)
+        self.assertIn("if(probe.unchanged) return", reconcile)
 
     def test_background_and_overlapping_polls_are_bounded(self):
         threads = self.html.split("const loadThreads=", 1)[1].split(

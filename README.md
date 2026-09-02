@@ -115,7 +115,12 @@ recently.
 
 The conversation renders entirely from the rollout JSONL on disk rather than a
 client-side cache — the cache was the single root cause of missing, duplicated,
-out-of-order and mis-timestamped messages.
+out-of-order and mis-timestamped messages. The bridge reverse-reads a bounded
+tail, pages older or newer complete turns through self-validating byte cursors,
+and the WebView retains at most three pages. Search scans the journal on demand
+and reports byte progress; it does not build an index. Physical JSONL order is
+authoritative even when record timestamps run backwards, so pagination never
+introduces a second ordering rule.
 
 Enter sends, Shift+Enter newlines. ⌘N new thread, ⌘R reload, ⌘Q quit.
 
