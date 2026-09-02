@@ -446,6 +446,12 @@ the app.
 9. **`agentMessage` carries a `phase`**: `commentary` (thinking aloud) vs
    `final_answer`. Read the `final_answer` for the result; a reply that looks
    empty is usually you reading the wrong item or field.
+10. **`thread/turns/list` returns ONE page (default 100) in the requested direction.** Ascending
+   from the start means the OLDEST 100 turns; on any long thread the newest turns are
+   invisible unless you paginate via `nextCursor` (newest-first, then reverse). `codex-run`
+   does this now; a hand-rolled reader that does not will report silence for a turn that
+   ran. When a reply looks empty, the rollout JSONL is ground truth — check it before you
+   re-dispatch (`./INCIDENTS.md`, "The transcript window hid every turn past the hundredth").
 
 ## Speaking Codex's language
 

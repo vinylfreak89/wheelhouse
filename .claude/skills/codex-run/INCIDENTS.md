@@ -233,3 +233,21 @@ commits. Two fixes: `lock release` now REFUSES to break a live foreign hold
 (exit 1; `--force` for deliberate breaks), and the standing rule for
 operators: **never redirect a guard's output to /dev/null** — a BUSY you
 cannot see is a hard stop you will not make.
+
+## The transcript window hid every turn past the hundredth — and the orchestrator re-dispatched a finished task three times
+
+*Rule: "Hook every dispatch" and gotcha 10 in SKILL.md.*
+
+`transcript()` asked `thread/turns/list` for one ascending page of 100 turns — the
+OLDEST 100. On a thread that had long passed 100 turns, every newer turn was
+invisible: `read` showed a days-old window, and `send` printed nothing because its
+before/after item count never grew. The orchestrator, seeing no reply and no trace of
+its task in `read`, concluded the dispatch had been swallowed and sent it again — and
+again via `queue`. Codex received the same verification task three times, completed
+it the first time, and finally had to relay through the user: "your dispatcher is
+stuck looping the already-completed verification task." Ground truth was the rollout
+JSONL the whole time. Fix: `transcript()` now walks the API newest-first via
+`nextCursor` until exhausted and reverses. Standing rule: when a bridge reply is
+empty, check the rollout (`~/.codex/sessions/**/rollout-*.jsonl`) BEFORE
+re-dispatching — silence from a reader is not evidence the turn didn't run
+(the same instrument-blindness lesson the project's LEARNINGS opens with).
