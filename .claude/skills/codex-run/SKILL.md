@@ -169,7 +169,7 @@ Never start a second `codex app-server` by hand.
     codex-run lock status                    # this root: who holds it, since when
     codex-run lock status --all              # every held root
     codex-run lock acquire claude "why"      # take it before you edit
-    codex-run lock release
+    codex-run lock release claude            # release with the SAME owner
     codex-run lock ... --root DIR            # act on another checkout's lock
 
 **Locks are scoped per working root** (the git toplevel containing the path, or
@@ -192,6 +192,12 @@ The shared mechanics — lockfile path and format, hard-stop-on-live-holds,
 narrow staging, commit conventions — are stated ONCE, in `./CODEX-TURN.md`
 (injected into every turn), and bind BOTH agents. This section covers only the
 orchestrator's CLI operations on top of them.
+
+**Release matches on owner name.** A bare `lock release` stands for the same
+default owner a bare `lock acquire` records (`manual`), so the bare pair
+round-trips; a hold taken as `acquire claude` is released only by
+`release claude`. Anything else is a foreign hold and is refused — the refusal
+prints the holder and the exact command (gotcha 11).
 
 **Staleness has two forms, and conflating them breaks it.** A turn holds the
 lock inside a long-lived process, so a dead pid means abandoned. A manual
@@ -452,6 +458,14 @@ the app.
    does this now; a hand-rolled reader that does not will report silence for a turn that
    ran. When a reply looks empty, the rollout JSONL is ground truth — check it before you
    re-dispatch (`./INCIDENTS.md`, "The transcript window hid every turn past the hundredth").
+11. **Release the tree lock with the same owner you acquired with.** `lock release`
+   matches on owner NAME: a bare release stands for the bare-acquire default (`manual`),
+   so `acquire claude "why"` followed by a bare `release` is refused as a foreign hold —
+   correctly, because that guard is what stops a routine release from destroying a
+   dispatcher's live `codex:<prefix>` hold (`./INCIDENTS.md`, "A silenced guard is no
+   guard"). Pair `acquire claude` with `release claude`; the refusal prints the holder and
+   the exact command. `--force` is for deliberately breaking someone else's hold, never
+   for a name you forgot.
 
 ## Speaking Codex's language
 
