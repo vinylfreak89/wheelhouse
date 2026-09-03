@@ -505,6 +505,13 @@ def _thread_active(prefix):
 #: a manual hold with no live process is abandoned after this long
 LOCK_MAX_AGE = int(os.environ.get("LOCK_MAX_AGE", "3600"))
 
+#: the owner a bare `lock acquire` records AND a bare `lock release` matches.
+#: They must be the same name: release matches on owner, so a default that
+#: differs between the two makes the bare pair unusable (observed: `acquire`
+#: recorded "manual", `release` passed None, and every bare release of a live
+#: manual hold was refused as foreign).
+MANUAL_OWNER = "manual"
+
 
 def lock_status(root=None):
     """Staleness has THREE forms, because holders differ.
@@ -625,11 +632,19 @@ def lock_release(owner=None, root=None, force=False):
     The old behavior deleted the file unconditionally when no owner was given,
     which let a bystander's routine `lock release` destroy a dispatcher's
     turn-long hold (observed: an orchestrator's commit ritual, run with output
-    suppressed, repeatedly bulldozed an active render turn's hold). Now: with
-    no owner given, only a stale hold (dead pid, or aged-out manual hold) or
-    one's own may be removed; a live foreign hold requires force=True and a
-    deliberate decision."""
+    suppressed, repeatedly bulldozed an active render turn's hold). Now: only
+    a stale hold (dead pid, or aged-out manual hold) or one's own may be
+    removed; a live foreign hold requires force=True and a deliberate decision.
+
+    "One's own" is decided by owner NAME, and a bare release stands for the
+    same default owner a bare acquire records (MANUAL_OWNER) -- so the bare
+    acquire/release pair round-trips, while a hold taken under any other name
+    (`acquire claude`, a dispatcher's `codex:<prefix>`) is released only by
+    naming that owner. The refusal names the holder and prints the exact
+    command that would release it, so the asymmetry is never a guessing game."""
     root = root or working_root()
+    if owner is None:
+        owner = MANUAL_OWNER
     d = _lock_read(root)
     if not d:
         return False
@@ -639,14 +654,19 @@ def lock_release(owner=None, root=None, force=False):
         # manual hold: live until it ages out
         st = lock_status(root) or {}
         live = not st.get("stale")
-    mine = owner is not None and d.get("owner") == owner
+    mine = d.get("owner") == owner
     if force or mine or not live:
         # `_path` may be the legacy global file rather than this root's file.
         try: os.remove(d.get("_path") or lock_path(root))
         except FileNotFoundError: pass
         return True
-    print(f"REFUSING to release live lock held by {d.get('owner')}"
-          f"{f' (pid {pid})' if pid else ''} -- pass --force to break it deliberately",
+    held = d.get("owner")
+    scope = "" if root == working_root() else f" --root {root}"
+    print(f"REFUSING to release live lock held by {held}"
+          f"{f' (pid {pid})' if pid else ''} -- a release matches on owner name, "
+          f"and this release stands for {owner!r}.\n"
+          f"  if that hold is yours:   codex-run lock release {held}{scope}\n"
+          f"  to break it deliberately: codex-run lock release --force{scope}",
           file=sys.stderr)
     return False
 
@@ -1081,7 +1101,7 @@ def main():
             d = lock_status(root)
             print(f"{root}: " + ("unlocked" if not d else _fmt(d)))
         elif sub == "acquire":
-            who = rest[0] if rest else "manual"
+            who = rest[0] if rest else MANUAL_OWNER
             # manual holds outlive this process, so record no pid
             ok = lock_acquire(who, root=root, note=" ".join(rest[1:]), pid=False,
                               wait=int(os.environ.get("LOCK_WAIT", "0")))

@@ -498,3 +498,57 @@ class NewCwdArgTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LockReleaseOwnerTests(unittest.TestCase):
+    """A bare `lock release` must round-trip a bare `lock acquire`, and must
+    still refuse every other live hold -- naming the holder and the command."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.root = str(base / "checkout")
+        os.makedirs(self.root)
+        self.patches = [
+            mock.patch.object(codex_run, "LOCKDIR", str(base / "tree-locks")),
+            mock.patch.object(codex_run, "LEGACY_LOCKFILE", str(base / "tree.lock")),
+            mock.patch.object(codex_run, "LEGACY_ROOT", str(base / "legacy-root")),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.temp.cleanup()
+
+    def test_bare_release_matches_bare_acquire(self):
+        self.assertTrue(codex_run.lock_acquire(codex_run.MANUAL_OWNER,
+                                               root=self.root, pid=False))
+        self.assertTrue(codex_run.lock_release(root=self.root))
+        self.assertIsNone(codex_run.lock_status(self.root))
+
+    def test_bare_release_refuses_a_live_manual_hold_under_another_name(self):
+        self.assertTrue(codex_run.lock_acquire("claude", root=self.root,
+                                               note="editing", pid=False))
+        import io
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self.assertFalse(codex_run.lock_release(root=self.root))
+        held = codex_run.lock_status(self.root)
+        self.assertIsNotNone(held, "the foreign hold must survive a bare release")
+        self.assertEqual(held["owner"], "claude")
+        self.assertIn("held by claude", err.getvalue())
+        self.assertIn("codex-run lock release claude", err.getvalue())
+        # naming the owner is the release path
+        self.assertTrue(codex_run.lock_release("claude", root=self.root))
+        self.assertIsNone(codex_run.lock_status(self.root))
+
+    def test_bare_release_refuses_a_live_dispatcher_hold(self):
+        # a turn-long hold names a live pid; this process stands in for it
+        self.assertTrue(codex_run.lock_acquire("codex:abcd1234", root=self.root))
+        with mock.patch.object(sys, "stderr", mock.MagicMock()):
+            self.assertFalse(codex_run.lock_release(root=self.root))
+        self.assertEqual(codex_run.lock_status(self.root)["owner"], "codex:abcd1234")
+        self.assertTrue(codex_run.lock_release(root=self.root, force=True))
+        self.assertIsNone(codex_run.lock_status(self.root))
